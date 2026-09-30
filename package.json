@@ -1,0 +1,7 @@
+{
+  "name": "tik-tok-downloader",
+  "type": "module",
+  "scripts": {
+    "start": "node src/index.js"
+  }
+}

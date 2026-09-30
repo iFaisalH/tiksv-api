@@ -1,0 +1,103 @@
+:root {
+  color-scheme: dark;
+  --bg: #080808;
+  --surface: #111;
+  --border: #2a2a2a;
+  --text: #f4f4f5;
+  --accent: #fe2c55;
+  --err: #f87171;
+  font-family: system-ui, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+}
+
+*, *::before, *::after {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100dvh;
+}
+
+.page {
+  width: min(640px, 100%);
+  margin: 0 auto;
+  padding: 3rem 1.25rem;
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  gap: 0.85rem;
+  margin-bottom: 2rem;
+}
+
+.brand-icon {
+  width: 44px;
+  height: 44px;
+}
+
+h1 {
+  margin: 0;
+  font-size: 1.4rem;
+  font-weight: 700;
+}
+
+h1 b {
+  font-weight: 800;
+}
+
+.form {
+  display: flex;
+  gap: 0.5rem;
+}
+
+input {
+  flex: 1;
+  min-width: 0;
+  padding: 0.85rem 1rem;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+  color: inherit;
+  font-size: 0.95rem;
+  outline: none;
+}
+
+input:focus {
+  border-color: #444;
+}
+
+button {
+  flex-shrink: 0;
+  min-width: 6.5rem;
+  padding: 0.85rem 1.25rem;
+  border: 0;
+  border-radius: 10px;
+  background: var(--accent);
+  color: #fff;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+}
+
+button:disabled {
+  opacity: 0.55;
+}
+
+.error {
+  margin: 0.85rem 0 0;
+  color: var(--err);
+  font-size: 0.875rem;
+}
+
+@media (max-width: 520px) {
+  .form {
+    flex-direction: column;
+  }
+
+  button {
+    width: 100%;
+  }
+}
