@@ -2,8 +2,7 @@ import vm from "node:vm";
 import fs from "node:fs";
 import path from "node:path";
 
-const sdk = fs.readFileSync(path.join(import.meta.dirname, "../vendor/webmssdk.js"), "utf8");
-
+const sdk = fs.readFileSync(new URL("../vendor/webmssdk.js", import.meta.url), "utf8");
 let acrawler;
 
 function getAcrawler() {
