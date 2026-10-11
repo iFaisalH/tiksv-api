@@ -42,5 +42,6 @@ export async function downloadStream(session, url) {
     headers: { "User-Agent": USER_AGENT, Referer: "https://www.tiktok.com/", Cookie: session.cookie },
   });
   if (!res.ok) throw new Error(`cdn ${res.status}`);
-  return Buffer.from(await res.arrayBuffer());
+  if (!res.body) throw new Error("cdn returned an empty response");
+  return res;
 }
