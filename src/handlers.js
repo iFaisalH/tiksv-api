@@ -1,3 +1,4 @@
+import { handleMultiPlatform } from "./multiplatform.js";
 import { parseLink, videoIdFromUrl } from "./parse/link.js";
 import { createSession } from "./tiktok/session.js";
 import { fetchFromPage, fetchByVideoId, followRedirect, downloadStream } from "./tiktok/item.js";
@@ -11,6 +12,13 @@ let session;
 export async function handleDownload(res, body) {
   try {
     const { input } = JSON.parse(body.toString("utf8") || "{}");
+    const raw = String(input ?? "").trim();
+    if (!raw) throw new Error("أدخل رابط الفيديو أولاً");
+    const host = new URL(/^https?:\/\//i.test(raw) ? raw : `https://${raw}`).hostname.toLowerCase();
+    if (!(host === "tiktok.com" || host.endsWith(".tiktok.com"))) {
+      await handleMultiPlatform(res, raw);
+      return;
+    }
     let { videoId, pageUrl, needsRedirect } = parseLink(input ?? "");
     const s = await (session ??= await createSession());
     if (needsRedirect && pageUrl) {

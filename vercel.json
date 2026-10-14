@@ -1,21 +1,11 @@
 {
   "version": 2,
   "builds": [
-    {
-      "src": "src/index.js",
-      "use": "@vercel/node",
-      "config": {
-        "includeFiles": [
-          "public/**",
-          "src/vendor/**"
-        ]
-      }
-    }
+    {"src": "src/index.js", "use": "@vercel/node", "config": {"includeFiles": ["public/**", "src/vendor/**"]}},
+    {"src": "api/extract.py", "use": "@vercel/python"}
   ],
   "routes": [
-    {
-      "src": "/(.*)",
-      "dest": "/src/index.js"
-    }
+    {"src": "/api/extract", "dest": "/api/extract.py"},
+    {"src": "/(.*)", "dest": "/src/index.js"}
   ]
 }
