@@ -1,8 +1,9 @@
-
 import json
 from http.server import BaseHTTPRequestHandler
 from urllib.parse import urlsplit
+
 import yt_dlp
+
 
 ALLOWED = (
     "youtube.com", "youtu.be", "youtube-nocookie.com",
@@ -18,20 +19,67 @@ ORIGINS = {
 }
 
 
+def select_video(ctx):
+    # yt-dlp يرتب الصيغ من الأقل إلى الأعلى جودة.
+    formats = list(reversed(ctx.get("formats") or []))
+
+    candidates = [
+        f for f in formats
+        if f.get("url", "").startswith("https://")
+        and f.get("vcodec") != "none"
+        and f.get("ext") not in (
+            "mhtml", "jpg", "jpeg", "png", "webp"
+        )
+        and not f.get("has_drm")
+        and (
+            f.get("protocol") == "https"
+            or (
+                not f.get("protocol")
+                and f.get("ext") in ("mp4", "webm", "mov")
+            )
+        )
+    ]
+
+    # نحتاج ملفًا مباشرًا يحتوي الصوت والفيديو معًا.
+    # نقبل البيانات غير المعروفة، لكن لا نختار فيديو
+    # معروفًا أنه بلا صوت.
+    candidates = [
+        f for f in candidates
+        if f.get("acodec") != "none"
+    ]
+
+    # نفضّل MP4، ثم بقية الملفات المباشرة المتاحة.
+    for f in candidates:
+        if f.get("ext") == "mp4":
+            yield f
+            return
+
+    if candidates:
+        yield candidates[0]
+
+
 class handler(BaseHTTPRequestHandler):
 
     def cors_headers(self):
         origin = self.headers.get("Origin", "")
+
         if origin in ORIGINS:
-            self.send_header("Access-Control-Allow-Origin", origin)
+            self.send_header(
+                "Access-Control-Allow-Origin", origin
+            )
             self.send_header("Vary", "Origin")
+
         self.send_header(
-            "Access-Control-Allow-Methods", "POST, OPTIONS"
+            "Access-Control-Allow-Methods",
+            "POST, OPTIONS"
         )
         self.send_header(
-            "Access-Control-Allow-Headers", "Content-Type"
+            "Access-Control-Allow-Headers",
+            "Content-Type"
         )
-        self.send_header("Access-Control-Max-Age", "86400")
+        self.send_header(
+            "Access-Control-Max-Age", "86400"
+        )
 
     def do_OPTIONS(self):
         self.send_response(204)
@@ -42,68 +90,126 @@ class handler(BaseHTTPRequestHandler):
     def do_POST(self):
         try:
             origin = self.headers.get("Origin", "")
+
             if origin and origin not in ORIGINS:
-                self.respond(403, {"error": "Origin not allowed"})
+                self.respond(
+                    403, {"error": "Origin not allowed"}
+                )
                 return
 
-            n = int(self.headers.get("Content-Length", "0"))
+            n = int(
+                self.headers.get("Content-Length", "0")
+            )
+
             if n < 1 or n > 10000:
-                raise ValueError("Invalid request")
+                raise ValueError("طلب غير صالح")
 
             payload = json.loads(self.rfile.read(n))
-            url = str(payload.get("url", "")).strip()
 
-            u = urlsplit(url)
-            host = (u.hostname or "").lower()
+            if not isinstance(payload, dict):
+                raise ValueError("طلب غير صالح")
+
+            url = str(payload.get("url", "")).strip()
+            parsed = urlsplit(url)
+            host = (parsed.hostname or "").lower()
 
             if (
-                u.scheme not in ("http", "https")
+                parsed.scheme not in ("http", "https")
+                or parsed.username is not None
+                or parsed.password is not None
+                or parsed.port not in (None, 80, 443)
                 or not any(
-                    host == d or host.endswith("." + d)
-                    for d in ALLOWED
+                    host == domain
+                    or host.endswith("." + domain)
+                    for domain in ALLOWED
                 )
             ):
-                raise ValueError("هذا الموقع غير مدعوم")
+                raise ValueError(
+                    "الرابط غير صالح أو الموقع غير مدعوم"
+                )
 
             opts = {
                 "quiet": True,
                 "no_warnings": True,
                 "noplaylist": True,
+                "playlistend": 1,
                 "skip_download": True,
                 "socket_timeout": 12,
                 "retries": 1,
-                "format": (
-                    "best[ext=mp4][vcodec!=none][acodec!=none]"
-                    "/best[vcodec!=none][acodec!=none]"
-                )
+                "cachedir": False,
+                "format": select_video
             }
 
             with yt_dlp.YoutubeDL(opts) as ydl:
-                info = ydl.extract_info(url, download=False)
+                info = ydl.extract_info(
+                    url, download=False
+                )
 
-            if not info:
-                raise ValueError("تعذر استخراج الفيديو")
-
-            if info.get("entries"):
+            while info and "entries" in info:
                 info = next(
-                    (x for x in info["entries"] if x),
+                    (
+                        item
+                        for item in (info.get("entries") or [])
+                        if item
+                    ),
                     None
                 )
 
-            direct = (info or {}).get("url")
-
-            if not direct or not direct.startswith("https://"):
+            if not info:
                 raise ValueError(
-                    "تعذر الحصول على رابط فيديو مباشر"
+                    "تعذر استخراج بيانات الفيديو"
+                )
+
+            direct = info.get("url", "")
+
+            if not direct.startswith("https://"):
+                raise ValueError(
+                    "لم يتوفر ملف فيديو مباشر لهذا الرابط"
                 )
 
             self.respond(200, {
                 "url": direct,
-                "headers": info.get("http_headers", {})
+                "headers": info.get("http_headers") or {}
             })
 
-        except Exception as e:
-            self.respond(400, {"error": str(e)[:300]})
+        except yt_dlp.utils.DownloadError as exc:
+            detail = str(exc)
+            print("VidKeep extraction error:", detail)
+
+            if "Requested format" in detail:
+                message = (
+                    "لم تتوفر صيغة مباشرة تجمع الفيديو "
+                    "والصوت لهذا الرابط."
+                )
+            elif any(
+                word in detail.lower()
+                for word in (
+                    "login", "sign in", "cookies",
+                    "private", "checkpoint"
+                )
+            ):
+                message = (
+                    "تعذر الوصول للفيديو؛ قد يكون خاصًا "
+                    "أو تتطلب المنصة تسجيل الدخول."
+                )
+            else:
+                message = (
+                    "تعذر جلب الفيديو من المنصة. "
+                    "جرّب رابط فيديو عام آخر."
+                )
+
+            self.respond(400, {"error": message})
+
+        except (ValueError, TypeError):
+            self.respond(400, {
+                "error": "تحقق من الرابط وصحة الطلب"
+            })
+
+        except Exception as exc:
+            print("VidKeep server error:", str(exc))
+            self.respond(500, {
+                "error": "حدث خطأ في خدمة التحميل"
+            })
 
     def respond(self, status, data):
         out = json.dumps(
@@ -116,6 +222,9 @@ class handler(BaseHTTPRequestHandler):
             "Content-Type",
             "application/json; charset=utf-8"
         )
-        self.send_header("Content-Length", str(len(out)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header(
+            "Content-Length", str(len(out))
+        )
         self.end_headers()
         self.wfile.write(out)
