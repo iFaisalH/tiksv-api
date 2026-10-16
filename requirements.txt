@@ -1,1 +1,1 @@
-yt-dlp>=2025.9.5
+yt-dlp[default]>=2025.9.5
