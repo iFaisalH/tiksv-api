@@ -37,19 +37,19 @@ def select_video(ctx):
     formats = reversed(ctx.get("formats") or [])
 
     candidates = [
-        f for f in formats
-        if str(f.get("url") or "").startswith("https://")
-        and f.get("vcodec") != "none"
-        and f.get("acodec") != "none"
-        and not f.get("has_drm")
-        and f.get("ext") not in (
+        item for item in formats
+        if str(item.get("url") or "").startswith("https://")
+        and item.get("vcodec") != "none"
+        and item.get("acodec") != "none"
+        and not item.get("has_drm")
+        and item.get("ext") not in (
             "mhtml", "jpg", "jpeg", "png", "webp"
         )
         and (
-            f.get("protocol") == "https"
+            item.get("protocol") == "https"
             or (
-                not f.get("protocol")
-                and f.get("ext") in ("mp4", "webm", "mov")
+                not item.get("protocol")
+                and item.get("ext") in ("mp4", "webm", "mov")
             )
         )
     ]
@@ -127,9 +127,9 @@ class handler(BaseHTTPRequestHandler):
             ):
                 raise ValueError()
 
+            is_youtube = matches_domain(host, YOUTUBE)
+
             opts = {
-                "js_runtimes": {"node": {}},
-                "remote_components": ["ejs:github"],
                 "quiet": True,
                 "no_warnings": False,
                 "noplaylist": True,
@@ -141,10 +141,37 @@ class handler(BaseHTTPRequestHandler):
                 "format": select_video
             }
 
+            if is_youtube:
+                try:
+                    import deno
+
+                    deno_path = str(deno.find_deno_bin())
+
+                    if not os.path.isfile(deno_path):
+                        raise RuntimeError()
+
+                    if not os.access(deno_path, os.X_OK):
+                        raise RuntimeError()
+
+                except Exception:
+                    self.respond(503, {
+                        "error": (
+                            "مشغّل Deno غير متاح على الخادم. "
+                            "تحقق من إضافة deno>=2.3.0 إلى "
+                            "requirements.txt ونجاح النشر."
+                        )
+                    })
+                    return
+
+                opts["js_runtimes"] = {
+                    "deno": {"path": deno_path}
+                }
+                opts["remote_components"] = ["ejs:github"]
+
             with tempfile.TemporaryDirectory(
                 prefix="vidkeep-"
             ) as temp_dir:
-                if matches_domain(host, YOUTUBE):
+                if is_youtube:
                     cookies = os.environ.get(
                         "YOUTUBE_COOKIES", ""
                     )
@@ -184,15 +211,18 @@ class handler(BaseHTTPRequestHandler):
                             ignore_discard=True,
                             ignore_expires=True
                         )
+
                         valid = any(
-                            cookie.domain.lstrip(".")
-                            == "youtube.com"
-                            or cookie.domain.lstrip(".")
-                            .endswith(".youtube.com")
+                            matches_domain(
+                                cookie.domain.lstrip(".").lower(),
+                                ("youtube.com",)
+                            )
                             for cookie in jar
                         )
+
                         if not valid:
                             raise ValueError()
+
                     except Exception:
                         self.respond(503, {
                             "error": (
@@ -245,8 +275,8 @@ class handler(BaseHTTPRequestHandler):
 
             if "not a bot" in detail:
                 message = (
-                    "يوتيوب ما زال يطلب التحقق من "
-                    "خادم التحميل رغم استخدام الجلسة."
+                    "يوتيوب يطلب التحقق من خادم التحميل. "
+                    "قد تكون الجلسة مرفوضة أو غير صالحة."
                 )
             elif "requested format" in detail:
                 message = (
