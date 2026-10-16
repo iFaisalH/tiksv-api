@@ -1,5 +1,6 @@
 import json
 import os
+import subprocess
 import tempfile
 from http.cookiejar import MozillaCookieJar
 from http.server import BaseHTTPRequestHandler
@@ -34,10 +35,9 @@ def matches_domain(host, domains):
 
 
 def select_video(ctx):
-    formats = reversed(ctx.get("formats") or [])
-
     candidates = [
-        item for item in formats
+        item
+        for item in reversed(ctx.get("formats") or [])
         if str(item.get("url") or "").startswith("https://")
         and item.get("vcodec") != "none"
         and item.get("acodec") != "none"
@@ -67,24 +67,18 @@ class handler(BaseHTTPRequestHandler):
 
     def cors_headers(self):
         origin = self.headers.get("Origin", "")
-
         if origin in ORIGINS:
             self.send_header(
                 "Access-Control-Allow-Origin", origin
             )
-
         self.send_header("Vary", "Origin")
         self.send_header(
-            "Access-Control-Allow-Methods",
-            "POST, OPTIONS"
+            "Access-Control-Allow-Methods", "POST, OPTIONS"
         )
         self.send_header(
-            "Access-Control-Allow-Headers",
-            "Content-Type"
+            "Access-Control-Allow-Headers", "Content-Type"
         )
-        self.send_header(
-            "Access-Control-Max-Age", "86400"
-        )
+        self.send_header("Access-Control-Max-Age", "86400")
 
     def do_OPTIONS(self):
         self.send_response(204)
@@ -95,7 +89,6 @@ class handler(BaseHTTPRequestHandler):
     def do_POST(self):
         try:
             origin = self.headers.get("Origin", "")
-
             if origin and origin not in ORIGINS:
                 self.respond(403, {
                     "error": "Origin not allowed"
@@ -105,12 +98,10 @@ class handler(BaseHTTPRequestHandler):
             length = int(
                 self.headers.get("Content-Length", "0")
             )
-
             if not 1 <= length <= 10000:
                 raise ValueError()
 
             payload = json.loads(self.rfile.read(length))
-
             if not isinstance(payload, dict):
                 raise ValueError()
 
@@ -143,39 +134,51 @@ class handler(BaseHTTPRequestHandler):
 
             if is_youtube:
                 try:
-                    import deno
+                    import nodejs_wheel
 
-                    deno_path = str(deno.find_deno_bin())
+                    node_path = os.path.join(
+                        os.path.dirname(nodejs_wheel.__file__),
+                        "bin",
+                        "node"
+                    )
 
-                    if not os.path.isfile(deno_path):
+                    if not os.path.isfile(node_path):
                         raise RuntimeError(
-                            "Deno executable file not found"
+                            "Bundled Node executable not found"
                         )
 
-                    if not os.access(deno_path, os.X_OK):
-                        raise RuntimeError(
-                            "Deno executable lacks execute permission"
-                        )
+                    result = subprocess.run(
+                        [node_path, "--version"],
+                        capture_output=True,
+                        text=True,
+                        timeout=10,
+                        check=True
+                    )
+
+                    print(
+                        "VidKeep Node ready:",
+                        result.stdout.strip(),
+                        flush=True
+                    )
 
                 except Exception as exc:
-                    # هذا الجزء لا يقرأ الكوكيز أو يطبعها.
                     print(
-                        "VidKeep Deno:",
+                        "VidKeep Node setup error:",
                         type(exc).__name__,
                         str(exc),
                         flush=True
                     )
                     self.respond(503, {
                         "error": (
-                            "مشغّل Deno غير متاح على الخادم. "
-                            "تحقق من إضافة deno>=2.3.0 إلى "
-                            "requirements.txt ونجاح النشر."
+                            "تعذر تشغيل Node على خادم التحميل. "
+                            "تحقق من تثبيت nodejs-wheel-binaries "
+                            "ونجاح النشر."
                         )
                     })
                     return
 
                 opts["js_runtimes"] = {
-                    "deno": {"path": deno_path}
+                    "node": {"path": node_path}
                 }
                 opts["remote_components"] = ["ejs:github"]
 
@@ -222,7 +225,6 @@ class handler(BaseHTTPRequestHandler):
                             ignore_discard=True,
                             ignore_expires=True
                         )
-
                         valid = any(
                             matches_domain(
                                 cookie.domain.lstrip(".").lower(),
@@ -230,7 +232,6 @@ class handler(BaseHTTPRequestHandler):
                             )
                             for cookie in jar
                         )
-
                         if not valid:
                             raise ValueError()
 
@@ -239,8 +240,7 @@ class handler(BaseHTTPRequestHandler):
                             "error": (
                                 "ملف جلسة يوتيوب غير صالح. "
                                 "صدّره بصيغة Netscape والصق "
-                                "محتواه كاملًا في "
-                                "YOUTUBE_COOKIES."
+                                "محتواه كاملًا في YOUTUBE_COOKIES."
                             )
                         })
                         return
@@ -269,7 +269,6 @@ class handler(BaseHTTPRequestHandler):
                 return
 
             direct = info.get("url") or ""
-
             if not direct.startswith("https://"):
                 self.respond(400, {
                     "error": (
@@ -307,9 +306,7 @@ class handler(BaseHTTPRequestHandler):
                     "لا تملك صلاحية الوصول للفيديو."
                 )
             else:
-                message = (
-                    "تعذر استخراج الفيديو من المنصة."
-                )
+                message = "تعذر استخراج الفيديو من المنصة."
 
             self.respond(400, {"error": message})
 
@@ -335,8 +332,6 @@ class handler(BaseHTTPRequestHandler):
             "application/json; charset=utf-8"
         )
         self.send_header("Cache-Control", "no-store")
-        self.send_header(
-            "Content-Length", str(len(output))
-        )
+        self.send_header("Content-Length", str(len(output)))
         self.end_headers()
         self.wfile.write(output)
