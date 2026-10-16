@@ -20,7 +20,6 @@ ORIGINS = {
 
 
 def select_video(ctx):
-    # yt-dlp يرتب الصيغ من الأقل إلى الأعلى جودة.
     formats = list(reversed(ctx.get("formats") or []))
 
     candidates = [
@@ -38,17 +37,9 @@ def select_video(ctx):
                 and f.get("ext") in ("mp4", "webm", "mov")
             )
         )
+        and f.get("acodec") != "none"
     ]
 
-    # نحتاج ملفًا مباشرًا يحتوي الصوت والفيديو معًا.
-    # نقبل البيانات غير المعروفة، لكن لا نختار فيديو
-    # معروفًا أنه بلا صوت.
-    candidates = [
-        f for f in candidates
-        if f.get("acodec") != "none"
-    ]
-
-    # نفضّل MP4، ثم بقية الملفات المباشرة المتاحة.
     for f in candidates:
         if f.get("ext") == "mp4":
             yield f
@@ -67,8 +58,8 @@ class handler(BaseHTTPRequestHandler):
             self.send_header(
                 "Access-Control-Allow-Origin", origin
             )
-            self.send_header("Vary", "Origin")
 
+        self.send_header("Vary", "Origin")
         self.send_header(
             "Access-Control-Allow-Methods",
             "POST, OPTIONS"
@@ -129,8 +120,9 @@ class handler(BaseHTTPRequestHandler):
                 )
 
             opts = {
+                "js_runtimes": {"node": {}},
                 "quiet": True,
-                "no_warnings": True,
+                "no_warnings": False,
                 "noplaylist": True,
                 "playlistend": 1,
                 "skip_download": True,
@@ -174,15 +166,25 @@ class handler(BaseHTTPRequestHandler):
 
         except yt_dlp.utils.DownloadError as exc:
             detail = str(exc)
+            lower_detail = detail.lower()
             print("VidKeep extraction error:", detail)
 
-            if "Requested format" in detail:
+            if (
+                "not a bot" in lower_detail
+                or "confirm you're" in lower_detail
+                or "confirm you’re" in lower_detail
+            ):
+                message = (
+                    "يوتيوب يطلب التحقق من خادم التحميل "
+                    "بأنه ليس روبوتًا. تعذر استخراج الفيديو."
+                )
+            elif "requested format" in lower_detail:
                 message = (
                     "لم تتوفر صيغة مباشرة تجمع الفيديو "
                     "والصوت لهذا الرابط."
                 )
             elif any(
-                word in detail.lower()
+                word in lower_detail
                 for word in (
                     "login", "sign in", "cookies",
                     "private", "checkpoint"
@@ -200,7 +202,8 @@ class handler(BaseHTTPRequestHandler):
 
             self.respond(400, {"error": message})
 
-        except (ValueError, TypeError):
+        except (ValueError, TypeError) as exc:
+            print("VidKeep request error:", str(exc))
             self.respond(400, {
                 "error": "تحقق من الرابط وصحة الطلب"
             })
