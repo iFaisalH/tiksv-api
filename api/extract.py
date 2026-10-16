@@ -1,8 +1,6 @@
 import json
 import os
 import subprocess
-import tempfile
-from http.cookiejar import MozillaCookieJar
 from http.server import BaseHTTPRequestHandler
 from urllib.parse import urlsplit
 
@@ -67,18 +65,24 @@ class handler(BaseHTTPRequestHandler):
 
     def cors_headers(self):
         origin = self.headers.get("Origin", "")
+
         if origin in ORIGINS:
             self.send_header(
                 "Access-Control-Allow-Origin", origin
             )
+
         self.send_header("Vary", "Origin")
         self.send_header(
-            "Access-Control-Allow-Methods", "POST, OPTIONS"
+            "Access-Control-Allow-Methods",
+            "POST, OPTIONS"
         )
         self.send_header(
-            "Access-Control-Allow-Headers", "Content-Type"
+            "Access-Control-Allow-Headers",
+            "Content-Type"
         )
-        self.send_header("Access-Control-Max-Age", "86400")
+        self.send_header(
+            "Access-Control-Max-Age", "86400"
+        )
 
     def do_OPTIONS(self):
         self.send_response(204)
@@ -89,6 +93,7 @@ class handler(BaseHTTPRequestHandler):
     def do_POST(self):
         try:
             origin = self.headers.get("Origin", "")
+
             if origin and origin not in ORIGINS:
                 self.respond(403, {
                     "error": "Origin not allowed"
@@ -98,10 +103,12 @@ class handler(BaseHTTPRequestHandler):
             length = int(
                 self.headers.get("Content-Length", "0")
             )
+
             if not 1 <= length <= 10000:
                 raise ValueError()
 
             payload = json.loads(self.rfile.read(length))
+
             if not isinstance(payload, dict):
                 raise ValueError()
 
@@ -182,75 +189,15 @@ class handler(BaseHTTPRequestHandler):
                 }
                 opts["remote_components"] = ["ejs:github"]
 
-            with tempfile.TemporaryDirectory(
-                prefix="vidkeep-"
-            ) as temp_dir:
-                if is_youtube:
-                    cookies = os.environ.get(
-                        "YOUTUBE_COOKIES", ""
-                    )
+                print(
+                    "VidKeep YouTube: extracting without cookies",
+                    flush=True
+                )
 
-                    if not cookies.strip():
-                        self.respond(503, {
-                            "error": (
-                                "لم يتم إعداد جلسة يوتيوب "
-                                "على خادم التحميل."
-                            )
-                        })
-                        return
-
-                    cookies = cookies.replace(
-                        "\r\n", "\n"
-                    ).replace("\r", "\n").lstrip("\ufeff")
-
-                    cookie_path = os.path.join(
-                        temp_dir, "youtube-cookies.txt"
-                    )
-
-                    with open(
-                        cookie_path,
-                        "w",
-                        encoding="utf-8",
-                        newline="\n"
-                    ) as cookie_file:
-                        cookie_file.write(
-                            cookies.rstrip("\n") + "\n"
-                        )
-
-                    os.chmod(cookie_path, 0o600)
-
-                    try:
-                        jar = MozillaCookieJar(cookie_path)
-                        jar.load(
-                            ignore_discard=True,
-                            ignore_expires=True
-                        )
-                        valid = any(
-                            matches_domain(
-                                cookie.domain.lstrip(".").lower(),
-                                ("youtube.com",)
-                            )
-                            for cookie in jar
-                        )
-                        if not valid:
-                            raise ValueError()
-
-                    except Exception:
-                        self.respond(503, {
-                            "error": (
-                                "ملف جلسة يوتيوب غير صالح. "
-                                "صدّره بصيغة Netscape والصق "
-                                "محتواه كاملًا في YOUTUBE_COOKIES."
-                            )
-                        })
-                        return
-
-                    opts["cookiefile"] = cookie_path
-
-                with yt_dlp.YoutubeDL(opts) as ydl:
-                    info = ydl.extract_info(
-                        url, download=False
-                    )
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(
+                    url, download=False
+                )
 
             while info and "entries" in info:
                 info = next(
@@ -269,6 +216,7 @@ class handler(BaseHTTPRequestHandler):
                 return
 
             direct = info.get("url") or ""
+
             if not direct.startswith("https://"):
                 self.respond(400, {
                     "error": (
@@ -285,8 +233,8 @@ class handler(BaseHTTPRequestHandler):
 
             if "not a bot" in detail:
                 message = (
-                    "يوتيوب يطلب التحقق من خادم التحميل. "
-                    "قد تكون الجلسة مرفوضة أو غير صالحة."
+                    "يوتيوب يطلب التحقق من خادم التحميل "
+                    "حتى بدون استخدام جلسة حساب."
                 )
             elif "requested format" in detail:
                 message = (
@@ -301,12 +249,13 @@ class handler(BaseHTTPRequestHandler):
                 )
             ):
                 message = (
-                    "رفضت المنصة الوصول للفيديو. "
-                    "قد تحتاج الجلسة إلى تجديد أو "
-                    "لا تملك صلاحية الوصول للفيديو."
+                    "رفضت المنصة الوصول للفيديو، "
+                    "أو يتطلب الفيديو تسجيل الدخول."
                 )
             else:
-                message = "تعذر استخراج الفيديو من المنصة."
+                message = (
+                    "تعذر استخراج الفيديو من المنصة."
+                )
 
             self.respond(400, {"error": message})
 
@@ -315,7 +264,12 @@ class handler(BaseHTTPRequestHandler):
                 "error": "تحقق من الرابط وصحة الطلب."
             })
 
-        except Exception:
+        except Exception as exc:
+            print(
+                "VidKeep server error:",
+                type(exc).__name__,
+                flush=True
+            )
             self.respond(500, {
                 "error": "حدث خطأ في خدمة التحميل."
             })
@@ -332,6 +286,8 @@ class handler(BaseHTTPRequestHandler):
             "application/json; charset=utf-8"
         )
         self.send_header("Cache-Control", "no-store")
-        self.send_header("Content-Length", str(len(output)))
+        self.send_header(
+            "Content-Length", str(len(output))
+        )
         self.end_headers()
         self.wfile.write(output)
