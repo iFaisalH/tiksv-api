@@ -148,12 +148,23 @@ class handler(BaseHTTPRequestHandler):
                     deno_path = str(deno.find_deno_bin())
 
                     if not os.path.isfile(deno_path):
-                        raise RuntimeError()
+                        raise RuntimeError(
+                            "Deno executable file not found"
+                        )
 
                     if not os.access(deno_path, os.X_OK):
-                        raise RuntimeError()
+                        raise RuntimeError(
+                            "Deno executable lacks execute permission"
+                        )
 
-                except Exception:
+                except Exception as exc:
+                    # هذا الجزء لا يقرأ الكوكيز أو يطبعها.
+                    print(
+                        "VidKeep Deno:",
+                        type(exc).__name__,
+                        str(exc),
+                        flush=True
+                    )
                     self.respond(503, {
                         "error": (
                             "مشغّل Deno غير متاح على الخادم. "
