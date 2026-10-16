@@ -188,6 +188,11 @@ class handler(BaseHTTPRequestHandler):
                     "node": {"path": node_path}
                 }
                 opts["remote_components"] = ["ejs:github"]
+                opts["extractor_args"] = {
+                    "youtube": {
+                        "player_client": ["mweb", "tv", "web_safari"]
+                    }
+                }
 
                 print(
                     "VidKeep YouTube: extracting without cookies",
