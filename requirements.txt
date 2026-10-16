@@ -1,1 +1,2 @@
 yt-dlp[default]>=2025.9.5
+deno>=2.3.0
