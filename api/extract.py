@@ -63,6 +63,33 @@ def select_video(ctx):
 
 class handler(BaseHTTPRequestHandler):
 
+    def do_GET(self):
+        if os.environ.get("VERCEL_ENV") != "preview":
+            self.respond(405, {"error": "Method not allowed"})
+            return
+        page = rb'''<!doctype html><meta charset="utf-8"><title>VidKeep YouTube test</title>
+<h1>VidKeep YouTube preview test</h1>
+<input id="url" size="65" value="https://www.youtube.com/watch?v=OyDEzNHwY_k">
+<button id="test">Test extraction</button><pre id="result"></pre><div id="media"></div>
+<script>
+document.getElementById('test').onclick = async () => {
+ const result = document.getElementById('result'); result.textContent = 'Testing...';
+ try {
+ const response = await fetch(location.pathname, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({url:document.getElementById('url').value})});
+ const data = await response.json(); result.textContent = 'HTTP ' + response.status + '\n' + (data.error || 'Extracted video URL');
+ if (data.url) {const a=document.createElement('a'); a.href=data.url; a.textContent='Download extracted video'; document.getElementById('media').replaceChildren(a);}
+ } catch (e) {result.textContent=String(e);}
+};
+</script>'''
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(page)))
+        self.end_headers()
+        self.wfile.write(page)
+
+
+
     def cors_headers(self):
         origin = self.headers.get("Origin", "")
 
@@ -94,7 +121,9 @@ class handler(BaseHTTPRequestHandler):
         try:
             origin = self.headers.get("Origin", "")
 
-            if origin and origin not in ORIGINS:
+            if (origin and origin not in ORIGINS
+                    and not (os.environ.get("VERCEL_ENV") == "preview"
+                             and origin == "https://tiksv-api-git-fix-youtube-mobile-test-vip-f-9849.vercel.app")):
                 self.respond(403, {
                     "error": "Origin not allowed"
                 })
