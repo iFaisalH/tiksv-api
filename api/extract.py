@@ -1,4 +1,7 @@
 import json
+import os
+import tempfile
+from http.cookiejar import MozillaCookieJar
 from http.server import BaseHTTPRequestHandler
 from urllib.parse import urlsplit
 
@@ -13,23 +16,35 @@ ALLOWED = (
     "reddit.com", "redd.it"
 )
 
+YOUTUBE = (
+    "youtube.com", "youtu.be", "youtube-nocookie.com"
+)
+
 ORIGINS = {
     "https://www.vidkeep.net",
     "https://vidkeep.net"
 }
 
 
+def matches_domain(host, domains):
+    return any(
+        host == domain or host.endswith("." + domain)
+        for domain in domains
+    )
+
+
 def select_video(ctx):
-    formats = list(reversed(ctx.get("formats") or []))
+    formats = reversed(ctx.get("formats") or [])
 
     candidates = [
         f for f in formats
-        if f.get("url", "").startswith("https://")
+        if str(f.get("url") or "").startswith("https://")
         and f.get("vcodec") != "none"
+        and f.get("acodec") != "none"
+        and not f.get("has_drm")
         and f.get("ext") not in (
             "mhtml", "jpg", "jpeg", "png", "webp"
         )
-        and not f.get("has_drm")
         and (
             f.get("protocol") == "https"
             or (
@@ -37,12 +52,11 @@ def select_video(ctx):
                 and f.get("ext") in ("mp4", "webm", "mov")
             )
         )
-        and f.get("acodec") != "none"
     ]
 
-    for f in candidates:
-        if f.get("ext") == "mp4":
-            yield f
+    for item in candidates:
+        if item.get("ext") == "mp4":
+            yield item
             return
 
     if candidates:
@@ -83,22 +97,22 @@ class handler(BaseHTTPRequestHandler):
             origin = self.headers.get("Origin", "")
 
             if origin and origin not in ORIGINS:
-                self.respond(
-                    403, {"error": "Origin not allowed"}
-                )
+                self.respond(403, {
+                    "error": "Origin not allowed"
+                })
                 return
 
-            n = int(
+            length = int(
                 self.headers.get("Content-Length", "0")
             )
 
-            if n < 1 or n > 10000:
-                raise ValueError("طلب غير صالح")
+            if not 1 <= length <= 10000:
+                raise ValueError()
 
-            payload = json.loads(self.rfile.read(n))
+            payload = json.loads(self.rfile.read(length))
 
             if not isinstance(payload, dict):
-                raise ValueError("طلب غير صالح")
+                raise ValueError()
 
             url = str(payload.get("url", "")).strip()
             parsed = urlsplit(url)
@@ -109,15 +123,9 @@ class handler(BaseHTTPRequestHandler):
                 or parsed.username is not None
                 or parsed.password is not None
                 or parsed.port not in (None, 80, 443)
-                or not any(
-                    host == domain
-                    or host.endswith("." + domain)
-                    for domain in ALLOWED
-                )
+                or not matches_domain(host, ALLOWED)
             ):
-                raise ValueError(
-                    "الرابط غير صالح أو الموقع غير مدعوم"
-                )
+                raise ValueError()
 
             opts = {
                 "js_runtimes": {"node": {}},
@@ -132,10 +140,77 @@ class handler(BaseHTTPRequestHandler):
                 "format": select_video
             }
 
-            with yt_dlp.YoutubeDL(opts) as ydl:
-                info = ydl.extract_info(
-                    url, download=False
-                )
+            # مجلد مؤقت منفصل لكل طلب ويُحذف بعد انتهائه.
+            with tempfile.TemporaryDirectory(
+                prefix="vidkeep-"
+            ) as temp_dir:
+                if matches_domain(host, YOUTUBE):
+                    cookies = os.environ.get(
+                        "YOUTUBE_COOKIES", ""
+                    )
+
+                    if not cookies.strip():
+                        self.respond(503, {
+                            "error": (
+                                "لم يتم إعداد جلسة يوتيوب "
+                                "على خادم التحميل."
+                            )
+                        })
+                        return
+
+                    cookies = cookies.replace(
+                        "\r\n", "\n"
+                    ).replace("\r", "\n").lstrip("\ufeff")
+
+                    cookie_path = os.path.join(
+                        temp_dir, "youtube-cookies.txt"
+                    )
+
+                    with open(
+                        cookie_path,
+                        "w",
+                        encoding="utf-8",
+                        newline="\n"
+                    ) as cookie_file:
+                        cookie_file.write(
+                            cookies.rstrip("\n") + "\n"
+                        )
+
+                    os.chmod(cookie_path, 0o600)
+
+                    # التحقق دون طباعة بيانات الجلسة.
+                    try:
+                        jar = MozillaCookieJar(cookie_path)
+                        jar.load(
+                            ignore_discard=True,
+                            ignore_expires=True
+                        )
+                        valid = any(
+                            cookie.domain.lstrip(".")
+                            == "youtube.com"
+                            or cookie.domain.lstrip(".")
+                            .endswith(".youtube.com")
+                            for cookie in jar
+                        )
+                        if not valid:
+                            raise ValueError()
+                    except Exception:
+                        self.respond(503, {
+                            "error": (
+                                "ملف جلسة يوتيوب غير صالح. "
+                                "صدّره بصيغة Netscape والصق "
+                                "محتواه كاملًا في "
+                                "YOUTUBE_COOKIES."
+                            )
+                        })
+                        return
+
+                    opts["cookiefile"] = cookie_path
+
+                with yt_dlp.YoutubeDL(opts) as ydl:
+                    info = ydl.extract_info(
+                        url, download=False
+                    )
 
             while info and "entries" in info:
                 info = next(
@@ -148,74 +223,69 @@ class handler(BaseHTTPRequestHandler):
                 )
 
             if not info:
-                raise ValueError(
-                    "تعذر استخراج بيانات الفيديو"
-                )
+                self.respond(400, {
+                    "error": "تعذر استخراج بيانات الفيديو."
+                })
+                return
 
-            direct = info.get("url", "")
+            direct = info.get("url") or ""
 
             if not direct.startswith("https://"):
-                raise ValueError(
-                    "لم يتوفر ملف فيديو مباشر لهذا الرابط"
-                )
+                self.respond(400, {
+                    "error": (
+                        "لم يتوفر ملف مباشر يجمع "
+                        "الفيديو والصوت."
+                    )
+                })
+                return
 
-            self.respond(200, {
-                "url": direct,
-                "headers": info.get("http_headers") or {}
-            })
+            # لا نُرجع Cookies أو ترويسات المصادقة للزائر.
+            self.respond(200, {"url": direct})
 
         except yt_dlp.utils.DownloadError as exc:
-            detail = str(exc)
-            lower_detail = detail.lower()
-            print("VidKeep extraction error:", detail)
+            detail = str(exc).lower()
 
-            if (
-                "not a bot" in lower_detail
-                or "confirm you're" in lower_detail
-                or "confirm you’re" in lower_detail
-            ):
+            if "not a bot" in detail:
                 message = (
-                    "يوتيوب يطلب التحقق من خادم التحميل "
-                    "بأنه ليس روبوتًا. تعذر استخراج الفيديو."
+                    "يوتيوب ما زال يطلب التحقق من "
+                    "خادم التحميل رغم استخدام الجلسة."
                 )
-            elif "requested format" in lower_detail:
+            elif "requested format" in detail:
                 message = (
-                    "لم تتوفر صيغة مباشرة تجمع الفيديو "
-                    "والصوت لهذا الرابط."
+                    "لم تتوفر صيغة مباشرة تجمع "
+                    "الفيديو والصوت لهذا الرابط."
                 )
             elif any(
-                word in lower_detail
+                word in detail
                 for word in (
                     "login", "sign in", "cookies",
                     "private", "checkpoint"
                 )
             ):
                 message = (
-                    "تعذر الوصول للفيديو؛ قد يكون خاصًا "
-                    "أو تتطلب المنصة تسجيل الدخول."
+                    "رفضت المنصة الوصول للفيديو. "
+                    "قد تحتاج الجلسة إلى تجديد أو "
+                    "لا تملك صلاحية الوصول للفيديو."
                 )
             else:
                 message = (
-                    "تعذر جلب الفيديو من المنصة. "
-                    "جرّب رابط فيديو عام آخر."
+                    "تعذر استخراج الفيديو من المنصة."
                 )
 
             self.respond(400, {"error": message})
 
-        except (ValueError, TypeError) as exc:
-            print("VidKeep request error:", str(exc))
+        except (ValueError, TypeError):
             self.respond(400, {
-                "error": "تحقق من الرابط وصحة الطلب"
+                "error": "تحقق من الرابط وصحة الطلب."
             })
 
-        except Exception as exc:
-            print("VidKeep server error:", str(exc))
+        except Exception:
             self.respond(500, {
-                "error": "حدث خطأ في خدمة التحميل"
+                "error": "حدث خطأ في خدمة التحميل."
             })
 
     def respond(self, status, data):
-        out = json.dumps(
+        output = json.dumps(
             data, ensure_ascii=False
         ).encode("utf-8")
 
@@ -227,7 +297,7 @@ class handler(BaseHTTPRequestHandler):
         )
         self.send_header("Cache-Control", "no-store")
         self.send_header(
-            "Content-Length", str(len(out))
+            "Content-Length", str(len(output))
         )
         self.end_headers()
-        self.wfile.write(out)
+        self.wfile.write(output)
