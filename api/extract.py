@@ -129,6 +129,7 @@ class handler(BaseHTTPRequestHandler):
 
             opts = {
                 "js_runtimes": {"node": {}},
+                "remote_components": ["ejs:github"],
                 "quiet": True,
                 "no_warnings": False,
                 "noplaylist": True,
@@ -140,7 +141,6 @@ class handler(BaseHTTPRequestHandler):
                 "format": select_video
             }
 
-            # مجلد مؤقت منفصل لكل طلب ويُحذف بعد انتهائه.
             with tempfile.TemporaryDirectory(
                 prefix="vidkeep-"
             ) as temp_dir:
@@ -178,7 +178,6 @@ class handler(BaseHTTPRequestHandler):
 
                     os.chmod(cookie_path, 0o600)
 
-                    # التحقق دون طباعة بيانات الجلسة.
                     try:
                         jar = MozillaCookieJar(cookie_path)
                         jar.load(
@@ -239,7 +238,6 @@ class handler(BaseHTTPRequestHandler):
                 })
                 return
 
-            # لا نُرجع Cookies أو ترويسات المصادقة للزائر.
             self.respond(200, {"url": direct})
 
         except yt_dlp.utils.DownloadError as exc:
