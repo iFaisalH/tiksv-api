@@ -1,6 +1,10 @@
 import json
 import os
 import subprocess
+import tempfile
+import time
+import warnings
+from http.cookiejar import MozillaCookieJar
 from http.server import BaseHTTPRequestHandler
 from urllib.parse import urlsplit
 
@@ -189,15 +193,37 @@ class handler(BaseHTTPRequestHandler):
                 }
                 opts["remote_components"] = ["ejs:github"]
 
-                print(
-                    "VidKeep YouTube: extracting without cookies",
-                    flush=True
-                )
+            with tempfile.TemporaryDirectory(prefix="vidkeep-") as temp_dir:
+                cookies = os.environ.get("YOUTUBE_COOKIES", "") if is_youtube else ""
+                if cookies.strip():
+                    cookies = cookies.replace("\r\n", "\n").replace("\r", "\n").lstrip("\ufeff")
+                    cookie_path = os.path.join(temp_dir, "youtube-cookies.txt")
+                    with open(cookie_path, "w", encoding="utf-8") as cookie_file:
+                        cookie_file.write(cookies.rstrip("\n") + "\n")
+                    os.chmod(cookie_path, 0o600)
+                    try:
+                        jar = MozillaCookieJar(cookie_path)
+                        # CookieJar warnings may contain cookie contents.
+                        with warnings.catch_warnings():
+                            warnings.simplefilter("ignore")
+                            jar.load(ignore_discard=True, ignore_expires=True)
+                        valid = any(
+                            matches_domain(cookie.domain.lstrip(".").lower(), YOUTUBE)
+                            and (cookie.expires in (None, 0) or cookie.expires > time.time())
+                            for cookie in jar
+                        )
+                        if not valid:
+                            raise ValueError()
+                    except Exception:
+                        self.respond(503, {"error": "جلسة يوتيوب المحفوظة غير صالحة أو منتهية. حدّث YOUTUBE_COOKIES بصيغة Netscape."})
+                        return
+                    opts["cookiefile"] = cookie_path
+                    print("VidKeep YouTube: using configured session", flush=True)
+                elif is_youtube:
+                    print("VidKeep YouTube: no configured session", flush=True)
 
-            with yt_dlp.YoutubeDL(opts) as ydl:
-                info = ydl.extract_info(
-                    url, download=False
-                )
+                with yt_dlp.YoutubeDL(opts) as ydl:
+                    info = ydl.extract_info(url, download=False)
 
             while info and "entries" in info:
                 info = next(
@@ -233,8 +259,8 @@ class handler(BaseHTTPRequestHandler):
 
             if "not a bot" in detail:
                 message = (
-                    "يوتيوب يطلب التحقق من خادم التحميل "
-                    "حتى بدون استخدام جلسة حساب."
+                    "يوتيوب يطلب التحقق من خادم التحميل. "
+                    "الجلسة الحالية لم تُقبل أو تحتاج إلى تجديد."
                 )
             elif "requested format" in detail:
                 message = (
