@@ -124,10 +124,16 @@ def native_youtube_worker(url, directory):
 
 def run_native_youtube(url, directory):
     canonical = canonical_youtube_url(url)
+    # Child interpreters must inherit Vercel runtime dependency paths.
+    worker_env = os.environ.copy()
+    worker_env["PYTHONPATH"] = os.pathsep.join(
+        dict.fromkeys(os.path.abspath(path or os.getcwd()) for path in sys.path)
+    )
     process = subprocess.Popen(
         [sys.executable, os.path.abspath(__file__), "--native-worker", canonical, directory],
         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
         start_new_session=True,
+        env=worker_env,
     )
     try:
         output, _ = process.communicate(timeout=35)
