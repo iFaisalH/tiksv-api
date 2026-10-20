@@ -44,59 +44,66 @@ class ProviderError(Exception):
         super().__init__(message)
 
 
-def extract_youtube_provider(url, api_key):
-    """Submit one job and return its finished MP4; never expose the API key."""
-    base = "https://vidkraken.com/api/v2/download"
+def extract_youtube_provider(url):
+    """Use the documented public API without accounts, credits, or API keys."""
+    base = "https://save.brianrianrehan.com"
     deadline = time.monotonic() + 35
 
     def request(endpoint, payload=None):
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            raise ProviderError(504, "استغرق تجهيز الفيديو وقتًا أطول من المتوقع. جرّب مقطعًا أقصر.")
+            raise ProviderError(504, "استغرق تجهيز الفيديو وقتًا أطول من المتوقع. حاول لاحقًا.")
         body = json.dumps(payload).encode() if payload is not None else None
         req = Request(endpoint, data=body, headers={
-            "Authorization": "Bearer " + api_key,
             "Content-Type": "application/json",
             "Accept": "application/json",
             "User-Agent": "VidKeep/1.0"
         })
         try:
             with urlopen(req, timeout=min(12, remaining)) as response:
-                data = json.loads(response.read(1024 * 1024))
+                result = json.loads(response.read(1024 * 1024))
+            if not isinstance(result, dict):
+                raise ValueError()
+            if result.get("success") is False or result.get("error"):
+                raise ProviderError(502, "تعذر تجهيز الفيديو لدى خدمة يوتيوب المجانية.")
+            data = result.get("data", result)
             if not isinstance(data, dict):
                 raise ValueError()
             return data
         except HTTPError as exc:
-            if exc.code == 401:
-                raise ProviderError(503, "تعذر توثيق خدمة يوتيوب. راجع مفتاح المزود في إعدادات الخادم.") from None
-            if exc.code in (402, 403, 429):
-                raise ProviderError(503, "خدمة يوتيوب وصلت إلى حد الاستخدام أو الرصيد. حاول لاحقًا.") from None
-            raise ProviderError(502, "تعذر تجهيز الفيديو لدى مزود يوتيوب.") from None
+            if exc.code == 429:
+                raise ProviderError(503, "خدمة يوتيوب المجانية وصلت إلى حد الاستخدام المؤقت. حاول لاحقًا.") from None
+            if exc.code == 413:
+                raise ProviderError(413, "حجم هذا الفيديو يتجاوز حد الخدمة المجانية.") from None
+            raise ProviderError(502, "تعذر تجهيز الفيديو لدى خدمة يوتيوب المجانية.") from None
         except (URLError, TimeoutError, ValueError):
-            raise ProviderError(502, "تعذر الاتصال بخدمة يوتيوب أو قراءة استجابتها.") from None
+            raise ProviderError(502, "تعذر الاتصال بخدمة يوتيوب المجانية أو قراءة استجابتها.") from None
 
-    job = request(base, {"url": url, "format": "360"})
-    job_id = str(job.get("jobId") or "")
-    if not job_id or len(job_id) > 128 or not all(c.isalnum() or c in "-_" for c in job_id):
-        raise ProviderError(502, "لم يرجع مزود يوتيوب رقم طلب صالحًا.")
+    job = request(base + "/api/v1/download?wait=false", {
+        "url": url, "format": "video", "quality": "best", "outputFormat": "mp4"
+    })
+    job_id = str(job.get("downloadId") or "")
+    if not job_id or len(job_id) > 128 or not all(c.isascii() and (c.isalnum() or c in "-_") for c in job_id):
+        raise ProviderError(502, "لم ترجع خدمة يوتيوب رقم طلب صالحًا.")
     while True:
         status = job.get("status")
-        if status == "COMPLETED":
+        if status == "completed":
             direct = str(job.get("downloadUrl") or "")
             parsed = urlsplit(direct)
             if (parsed.scheme != "https" or parsed.username or parsed.password
-                    or not matches_domain((parsed.hostname or "").lower(), ("vidkraken.com",))):
-                raise ProviderError(502, "لم يرجع مزود يوتيوب رابط تنزيل صالحًا.")
+                    or parsed.port not in (None, 443)
+                    or (parsed.hostname or "").lower() != "save.brianrianrehan.com"):
+                raise ProviderError(502, "لم ترجع خدمة يوتيوب رابط تنزيل صالحًا.")
             return direct
-        if status == "FAILED":
+        if status == "failed":
             raise ProviderError(422, "تعذر تنزيل هذا المقطع. قد يكون خاصًا أو محذوفًا أو مقيدًا.")
-        if status not in ("IN_QUEUE", "IN_PROGRESS"):
-            raise ProviderError(502, "استجابة غير متوقعة من مزود يوتيوب.")
+        if status not in ("pending", "processing", "downloading", "converting"):
+            raise ProviderError(502, "استجابة غير متوقعة من خدمة يوتيوب المجانية.")
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            raise ProviderError(504, "استغرق تجهيز الفيديو وقتًا أطول من المتوقع. جرّب مقطعًا أقصر.")
+            raise ProviderError(504, "استغرق تجهيز الفيديو وقتًا أطول من المتوقع. حاول لاحقًا.")
         time.sleep(min(1.5, remaining))
-        job = request(base + "/" + job_id)
+        job = request(base + "/api/v1/download/" + job_id)
 
 
 def select_video(ctx):
@@ -225,9 +232,8 @@ class handler(BaseHTTPRequestHandler):
 
             is_youtube = matches_domain(host, YOUTUBE)
 
-            provider_key = os.environ.get("VIDKRAKEN_API_KEY", "").strip()
-            if is_youtube and provider_key:
-                direct = extract_youtube_provider(url, provider_key)
+            if is_youtube:
+                direct = extract_youtube_provider(url)
                 # The existing Blogger downloader sends both fields and
                 # accepts video bytes. Internal API callers still get JSON.
                 if payload.get("input") == url:
