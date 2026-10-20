@@ -190,7 +190,7 @@ def run_native_youtube(url, directory):
     return path, result
 
 
-def extract_youtube_provider(url):
+def extract_youtube_provider(url, download_id=None, asynchronous=False):
     """Use the documented public API without accounts, credits, or API keys."""
     base = "https://save.brianrianrehan.com"
     deadline = time.monotonic() + 35
@@ -206,7 +206,7 @@ def extract_youtube_provider(url):
             "User-Agent": "VidKeep/1.0"
         })
         try:
-            with urlopen(req, timeout=min(12, remaining)) as response:
+            with urlopen(req, timeout=min(25 if asynchronous else 12, remaining)) as response:
                 result = json.loads(response.read(1024 * 1024))
             if not isinstance(result, dict):
                 raise ValueError()
@@ -225,10 +225,16 @@ def extract_youtube_provider(url):
         except (URLError, TimeoutError, ValueError):
             raise ProviderError(502, "تعذر الاتصال بخدمة يوتيوب المجانية أو قراءة استجابتها.") from None
 
-    job = request(base + "/api/v1/download?wait=false", {
-        "url": url, "format": "video", "quality": "best", "outputFormat": "mp4"
-    })
-    job_id = str(job.get("downloadId") or "")
+    if download_id is not None:
+        job_id = str(download_id)
+        if not job_id or len(job_id) > 128 or not all(c.isascii() and (c.isalnum() or c in "-_") for c in job_id):
+            raise ValueError()
+        job = request(base + "/api/v1/download/" + job_id)
+    else:
+        job = request(base + "/api/v1/download?wait=false", {
+            "url": canonical_youtube_url(url), "format": "video", "quality": "best", "outputFormat": "mp4"
+        })
+        job_id = str(job.get("downloadId") or "")
     if not job_id or len(job_id) > 128 or not all(c.isascii() and (c.isalnum() or c in "-_") for c in job_id):
         raise ProviderError(502, "لم ترجع خدمة يوتيوب رقم طلب صالحًا.")
     while True:
@@ -245,6 +251,9 @@ def extract_youtube_provider(url):
             raise ProviderError(422, "تعذر تنزيل هذا المقطع. قد يكون خاصًا أو محذوفًا أو مقيدًا.")
         if status not in ("pending", "processing", "downloading", "converting"):
             raise ProviderError(502, "استجابة غير متوقعة من خدمة يوتيوب المجانية.")
+        if asynchronous:
+            # Resume this provider job in a later short request.
+            return {"status": status, "downloadId": job_id, "retryAfter": 3}
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise ProviderError(504, "استغرق تجهيز الفيديو وقتًا أطول من المتوقع. حاول لاحقًا.")
@@ -402,7 +411,13 @@ class handler(BaseHTTPRequestHandler):
                         path, metadata = run_native_youtube(url, directory)
                         self.send_native_video(path, metadata)
                     return
-                direct = extract_youtube_provider(url)
+                direct = extract_youtube_provider(
+                    url, download_id=payload.get("downloadId"),
+                    asynchronous=payload.get("async") is True,
+                )
+                if isinstance(direct, dict):
+                    self.respond(202, direct)
+                    return
                 # The existing Blogger downloader sends both fields and
                 # accepts video bytes. Internal API callers still get JSON.
                 if payload.get("input") == url:
