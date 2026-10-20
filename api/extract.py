@@ -130,6 +130,37 @@ def select_video(ctx):
 
 class handler(BaseHTTPRequestHandler):
 
+    def send_youtube_video(self, direct):
+        """Stream provider media through our CORS-enabled endpoint."""
+        req = Request(direct, headers={"User-Agent": "VidKeep/1.0"})
+        try:
+            upstream = urlopen(req, timeout=30)
+        except (HTTPError, URLError, TimeoutError):
+            raise ProviderError(502, "تعذر نقل ملف الفيديو من مزود يوتيوب.") from None
+        with upstream:
+            content_type = upstream.headers.get("Content-Type", "video/mp4")
+            if not (content_type.startswith("video/") or content_type.startswith("application/octet-stream")):
+                raise ProviderError(502, "لم يرجع مزود يوتيوب ملف فيديو صالحًا.")
+            self.send_response(200)
+            self.cors_headers()
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Disposition", 'attachment; filename="vidkeep_youtube.mp4"')
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Access-Control-Expose-Headers", "Content-Length, Content-Disposition")
+            length = upstream.headers.get("Content-Length", "")
+            if length.isdigit():
+                self.send_header("Content-Length", length)
+            self.end_headers()
+            try:
+                while True:
+                    chunk = upstream.read(65536)
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+            except (OSError, TimeoutError):
+                # Headers are already sent: never append JSON to a media file.
+                self.close_connection = True
+
     def cors_headers(self):
         origin = self.headers.get("Origin", "")
 
@@ -197,7 +228,12 @@ class handler(BaseHTTPRequestHandler):
             provider_key = os.environ.get("VIDKRAKEN_API_KEY", "").strip()
             if is_youtube and provider_key:
                 direct = extract_youtube_provider(url, provider_key)
-                self.respond(200, {"url": direct})
+                # The existing Blogger downloader sends both fields and
+                # accepts video bytes. Internal API callers still get JSON.
+                if payload.get("input") == url:
+                    self.send_youtube_video(direct)
+                else:
+                    self.respond(200, {"url": direct})
                 return
 
             opts = {
