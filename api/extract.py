@@ -67,6 +67,39 @@ def canonical_youtube_url(url):
     return "https://www.youtube.com/watch?v=" + video_id
 
 
+def configured_youtube_cookiefile(directory):
+    """Reuse only the YouTube session explicitly configured on this server."""
+    cookies = os.environ.get("YOUTUBE_COOKIES", "")
+    if not cookies.strip():
+        return None
+    cookies = cookies.replace("\r\n", "\n").replace("\r", "\n").lstrip("\ufeff")
+    cookie_path = os.path.join(directory, "youtube-cookies.txt")
+    jar = MozillaCookieJar()
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=directory,
+                                         prefix="session-", delete=False) as source:
+            source.write(cookies.rstrip("\n") + "\n")
+            source_path = source.name
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            jar.load(source_path, ignore_discard=True, ignore_expires=True)
+        youtube_jar = MozillaCookieJar(cookie_path)
+        for cookie in jar:
+            if (matches_domain(cookie.domain.lstrip(".").lower(), YOUTUBE)
+                    and (cookie.expires in (None, 0) or cookie.expires > time.time())):
+                youtube_jar.set_cookie(cookie)
+        if not len(youtube_jar):
+            raise ValueError()
+        youtube_jar.save(ignore_discard=True, ignore_expires=False)
+        os.chmod(cookie_path, 0o600)
+    except Exception:
+        raise ProviderError(503, "جلسة يوتيوب المحفوظة غير صالحة أو منتهية. يلزم تجديدها في إعدادات الخادم.") from None
+    finally:
+        if "source_path" in locals():
+            os.unlink(source_path)
+    return cookie_path
+
+
 def native_youtube_worker(url, directory):
     """Our downloader: no hosted download API, credentials or paid fallback."""
     import imageio_ffmpeg
@@ -112,6 +145,9 @@ def native_youtube_worker(url, directory):
         "progress_hooks": [limit_disk],
         "postprocessor_args": {"Merger+ffmpeg_o": ["-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart"]},
     }
+    cookie_path = configured_youtube_cookiefile(directory)
+    if cookie_path:
+        opts["cookiefile"] = cookie_path
     with yt_dlp.YoutubeDL(opts) as ydl:
         info = ydl.extract_info(canonical_youtube_url(url), download=True)
     if not info or info.get("is_live"):
