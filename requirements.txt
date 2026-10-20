@@ -1,2 +1,3 @@
-yt-dlp[default]>=2025.9.5
+yt-dlp[default]>=2026.8.19
 nodejs-wheel-binaries>=24,<25
+imageio-ffmpeg==0.6.0
