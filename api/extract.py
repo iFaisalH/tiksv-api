@@ -7,6 +7,8 @@ import warnings
 from http.cookiejar import MozillaCookieJar
 from http.server import BaseHTTPRequestHandler
 from urllib.parse import urlsplit
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 
 import yt_dlp
 
@@ -34,6 +36,67 @@ def matches_domain(host, domains):
         host == domain or host.endswith("." + domain)
         for domain in domains
     )
+
+
+class ProviderError(Exception):
+    def __init__(self, status, message):
+        self.status = status
+        super().__init__(message)
+
+
+def extract_youtube_provider(url, api_key):
+    """Submit one job and return its finished MP4; never expose the API key."""
+    base = "https://vidkraken.com/api/v2/download"
+    deadline = time.monotonic() + 35
+
+    def request(endpoint, payload=None):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise ProviderError(504, "استغرق تجهيز الفيديو وقتًا أطول من المتوقع. جرّب مقطعًا أقصر.")
+        body = json.dumps(payload).encode() if payload is not None else None
+        req = Request(endpoint, data=body, headers={
+            "Authorization": "Bearer " + api_key,
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "User-Agent": "VidKeep/1.0"
+        })
+        try:
+            with urlopen(req, timeout=min(12, remaining)) as response:
+                data = json.loads(response.read(1024 * 1024))
+            if not isinstance(data, dict):
+                raise ValueError()
+            return data
+        except HTTPError as exc:
+            if exc.code == 401:
+                raise ProviderError(503, "تعذر توثيق خدمة يوتيوب. راجع مفتاح المزود في إعدادات الخادم.") from None
+            if exc.code in (402, 403, 429):
+                raise ProviderError(503, "خدمة يوتيوب وصلت إلى حد الاستخدام أو الرصيد. حاول لاحقًا.") from None
+            raise ProviderError(502, "تعذر تجهيز الفيديو لدى مزود يوتيوب.") from None
+        except (URLError, TimeoutError, ValueError):
+            raise ProviderError(502, "تعذر الاتصال بخدمة يوتيوب أو قراءة استجابتها.") from None
+
+    job = request(base, {"url": url, "format": "360"})
+    job_id = str(job.get("jobId") or "")
+    if not job_id or len(job_id) > 128 or not all(c.isalnum() or c in "-_" for c in job_id):
+        raise ProviderError(502, "لم يرجع مزود يوتيوب رقم طلب صالحًا.")
+    while True:
+        status = job.get("status")
+        if status == "COMPLETED":
+            direct = str(job.get("downloadUrl") or "")
+            parsed = urlsplit(direct)
+            if (parsed.scheme != "https" or parsed.username or parsed.password
+                    or not matches_domain((parsed.hostname or "").lower(), ("vidkraken.com",))):
+                raise ProviderError(502, "لم يرجع مزود يوتيوب رابط تنزيل صالحًا.")
+            return direct
+        if status == "FAILED":
+            raise ProviderError(422, "تعذر تنزيل هذا المقطع. قد يكون خاصًا أو محذوفًا أو مقيدًا.")
+        if status not in ("IN_QUEUE", "IN_PROGRESS"):
+            raise ProviderError(502, "استجابة غير متوقعة من مزود يوتيوب.")
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise ProviderError(504, "استغرق تجهيز الفيديو وقتًا أطول من المتوقع. جرّب مقطعًا أقصر.")
+        time.sleep(min(1.5, remaining))
+        job = request(base + "/" + job_id)
 
 
 def select_video(ctx):
@@ -130,6 +193,12 @@ class handler(BaseHTTPRequestHandler):
                 raise ValueError()
 
             is_youtube = matches_domain(host, YOUTUBE)
+
+            provider_key = os.environ.get("VIDKRAKEN_API_KEY", "").strip()
+            if is_youtube and provider_key:
+                direct = extract_youtube_provider(url, provider_key)
+                self.respond(200, {"url": direct})
+                return
 
             opts = {
                 "quiet": True,
@@ -253,6 +322,9 @@ class handler(BaseHTTPRequestHandler):
                 return
 
             self.respond(200, {"url": direct})
+
+        except ProviderError as exc:
+            self.respond(exc.status, {"error": str(exc)})
 
         except yt_dlp.utils.DownloadError as exc:
             detail = str(exc).lower()
