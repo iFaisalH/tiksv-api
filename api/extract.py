@@ -4,9 +4,12 @@ import subprocess
 import tempfile
 import time
 import warnings
+import sys
+import signal
+import shutil
 from http.cookiejar import MozillaCookieJar
 from http.server import BaseHTTPRequestHandler
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, parse_qs
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -42,6 +45,107 @@ class ProviderError(Exception):
     def __init__(self, status, message):
         self.status = status
         super().__init__(message)
+
+
+def canonical_youtube_url(url):
+    """Only process a single video, never a user-controlled redirect or playlist."""
+    parsed = urlsplit(url)
+    host = (parsed.hostname or "").lower()
+    if not matches_domain(host, YOUTUBE):
+        raise ValueError()
+    parts = parsed.path.strip("/").split("/")
+    if host == "youtu.be":
+        video_id = parts[0]
+    elif len(parts) == 2 and parts[0] in ("shorts", "embed", "live", "v"):
+        video_id = parts[1]
+    elif parsed.path == "/watch":
+        video_id = parse_qs(parsed.query).get("v", [""])[0]
+    else:
+        raise ValueError()
+    if len(video_id) != 11 or not all(c.isascii() and (c.isalnum() or c in "-_") for c in video_id):
+        raise ValueError()
+    return "https://www.youtube.com/watch?v=" + video_id
+
+
+def native_youtube_worker(url, directory):
+    """Our downloader: no hosted download API, credentials or paid fallback."""
+    import imageio_ffmpeg
+
+    class SafeLogger:
+        def debug(self, message):
+            pass
+
+        def warning(self, message):
+            pass
+
+        def error(self, message):
+            pass
+
+    node_path = shutil.which("node")
+    if not node_path:
+        import nodejs_wheel
+        node_path = os.path.join(os.path.dirname(nodejs_wheel.__file__), "bin", "node")
+    ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+    # yt-dlp discovers ffmpeg by its conventional name within this directory.
+    os.symlink(ffmpeg, os.path.join(directory, "ffmpeg"))
+    limit = 256 * 1024 * 1024
+
+    def limit_disk(progress):
+        total = sum(entry.stat().st_size for entry in os.scandir(directory)
+                    if entry.is_file(follow_symlinks=False))
+        if total > limit * 2 or (progress.get("total_bytes") or 0) > limit:
+            raise ProviderError(413, "حجم الفيديو يتجاوز سعة المعالجة الحالية.")
+
+    opts = {
+        "quiet": True, "logger": SafeLogger(), "no_warnings": True,
+        "noplaylist": True, "playlistend": 1, "cachedir": False,
+        "socket_timeout": 10, "retries": 0, "extractor_retries": 0,
+        # Use the operating system's trusted CA store; TLS checks stay enabled.
+        "compat_opts": {"no-certifi"},
+        "fragment_retries": 0, "concurrent_fragment_downloads": 2,
+        "js_runtimes": {"node": {"path": node_path}},
+        "ffmpeg_location": directory,
+        "format": "bv*+ba/b", "format_sort": ["res", "fps", "vcodec:h264"],
+        "merge_output_format": "mp4", "max_filesize": limit,
+        "outtmpl": os.path.join(directory, "video.%(ext)s"),
+        "match_filter": lambda info, **kwargs: "البث المباشر غير مدعوم" if info.get("is_live") else None,
+        "progress_hooks": [limit_disk],
+        "postprocessor_args": {"Merger+ffmpeg_o": ["-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart"]},
+    }
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        info = ydl.extract_info(canonical_youtube_url(url), download=True)
+    if not info or info.get("is_live"):
+        raise ProviderError(422, "البث المباشر غير مدعوم في محرك التنزيل.")
+    path = os.path.join(directory, "video.mp4")
+    if not os.path.isfile(path) or not 0 < os.path.getsize(path) <= limit:
+        raise ProviderError(422, "لم ينتج محرك التنزيل ملف MP4 صالحًا ضمن سعة المعالجة.")
+    return {"file": "video.mp4", "height": info.get("height"), "width": info.get("width")}
+
+
+def run_native_youtube(url, directory):
+    canonical = canonical_youtube_url(url)
+    process = subprocess.Popen(
+        [sys.executable, os.path.abspath(__file__), "--native-worker", canonical, directory],
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+        start_new_session=True,
+    )
+    try:
+        output, _ = process.communicate(timeout=35)
+    except subprocess.TimeoutExpired:
+        # Kill ffmpeg children too, then let TemporaryDirectory remove partials.
+        os.killpg(process.pid, signal.SIGKILL)
+        process.communicate()
+        raise ProviderError(504, "انتهت مهلة محرك التنزيل الخاص أثناء تجهيز الفيديو.") from None
+    try:
+        result = json.loads(output)
+    except ValueError:
+        raise ProviderError(502, "تعذر تشغيل محرك التنزيل الخاص.") from None
+    if process.returncode or "error" in result:
+        raise ProviderError(result.get("status", 502), result.get("error", "تعذر تنزيل الفيديو."))
+    path = os.path.join(directory, "video.mp4")
+    if result.get("file") != "video.mp4" or not os.path.isfile(path):
+        raise ProviderError(502, "لم ينتج محرك التنزيل ملفًا صالحًا.")
+    return path, result
 
 
 def extract_youtube_provider(url):
@@ -136,6 +240,23 @@ def select_video(ctx):
 
 
 class handler(BaseHTTPRequestHandler):
+
+    def send_native_video(self, path, metadata):
+        with open(path, "rb") as video:
+            self.send_response(200)
+            self.cors_headers()
+            self.send_header("Content-Type", "video/mp4")
+            self.send_header("Content-Length", str(os.fstat(video.fileno()).st_size))
+            self.send_header("Content-Disposition", 'attachment; filename="VidKeep-YouTube.mp4"')
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-VidKeep-Engine", "native")
+            self.send_header("X-Video-Height", str(metadata.get("height") or 0))
+            self.send_header("Access-Control-Expose-Headers", "Content-Length, Content-Disposition, X-VidKeep-Engine, X-Video-Height")
+            self.end_headers()
+            try:
+                shutil.copyfileobj(video, self.wfile, length=65536)
+            except OSError:
+                self.close_connection = True
 
     def send_youtube_video(self, direct):
         """Stream provider media through our CORS-enabled endpoint."""
@@ -233,6 +354,12 @@ class handler(BaseHTTPRequestHandler):
             is_youtube = matches_domain(host, YOUTUBE)
 
             if is_youtube:
+                # Test explicitly before enabling the native engine site-wide.
+                if payload.get("engine") == "native" or os.environ.get("YOUTUBE_ENGINE") == "native":
+                    with tempfile.TemporaryDirectory(prefix="vidkeep-native-") as directory:
+                        path, metadata = run_native_youtube(url, directory)
+                        self.send_native_video(path, metadata)
+                    return
                 direct = extract_youtube_provider(url)
                 # The existing Blogger downloader sends both fields and
                 # accepts video bytes. Internal API callers still get JSON.
@@ -431,3 +558,22 @@ class handler(BaseHTTPRequestHandler):
         )
         self.end_headers()
         self.wfile.write(output)
+
+
+if __name__ == "__main__" and len(sys.argv) == 4 and sys.argv[1] == "--native-worker":
+    try:
+        print(json.dumps(native_youtube_worker(sys.argv[2], sys.argv[3])))
+    except ProviderError as exc:
+        print(json.dumps({"status": exc.status, "error": str(exc)}))
+        sys.exit(1)
+    except yt_dlp.utils.DownloadError as exc:
+        detail = str(exc).lower()
+        blocked = "not a bot" in detail or "sign in to confirm" in detail
+        print(json.dumps({"status": 503 if blocked else 422, "error": (
+            "يوتيوب رفض طلب محرك التنزيل من الخادم وطلب التحقق."
+            if blocked else "تعذر تنزيل هذا الفيديو عبر المحرك الخاص."
+        )}))
+        sys.exit(1)
+    except Exception:
+        print(json.dumps({"status": 502, "error": "تعذر تشغيل أحد مكونات محرك التنزيل."}))
+        sys.exit(1)
