@@ -187,6 +187,48 @@ def collect_public_items(page_props, username):
             "truncated": False, "scope": "public-page-visible"}
 
 
+
+def single_public_story_from_share(url):
+    """Extract only an unambiguous public video from a share/highlight page.
+
+    Never pick an unrelated video from recommendations or a whole profile.
+    Return None for unavailable or multi-video stories.
+    """
+    try:
+        u = urlsplit(url)
+        path = u.path
+        if (u.scheme != "https" or u.username or u.password
+                or u.port not in (None, 443)
+                or not host_allowed((u.hostname or "").lower(), SNAP)):
+            return None
+        if not (re.fullmatch(r"/t/[A-Za-z0-9]{8}/?", path)
+                or re.fullmatch(r"/@[A-Za-z0-9_.-]+/highlight/[A-Fa-f0-9-]{16,64}/?", path)
+                or re.fullmatch(r"/o/[A-Za-z0-9_-]{20,128}/?", path)):
+            return None
+
+        props = _read_public_json(url)
+        # These keys identify the primary shared story, not suggested items.
+        for key in ("selectedStory", "preselectedStory", "playerStory",
+                    "premiumStory", "highlightStory", "story"):
+            source = props.get(key)
+            if not isinstance(source, dict):
+                continue
+            snaps = source.get("snapList") or []
+            if not isinstance(snaps, list):
+                continue
+            videos = [_media_url(snap) for snap in snaps
+                      if isinstance(snap, dict) and _video(snap, "story")]
+            videos = [media for media in videos if media]
+            if len(videos) == 1:
+                return videos[0]
+            if len(videos) > 1:
+                return None
+    except (HTTPError, URLError, TimeoutError, ValueError):
+        return None
+    return None
+
+
+
 def list_public_profile(url):
     username = profile_username(url)
     if not username:
