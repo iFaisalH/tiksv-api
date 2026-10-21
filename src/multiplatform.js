@@ -11,6 +11,35 @@ export async function handleMultiPlatform(res, input) {
     const base = process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : `http://localhost:${process.env.PORT || 3000}`;
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 45000);
+    const snapchat = hostname === "snapchat.com" || hostname.endsWith(".snapchat.com");
+    if (snapchat) {
+      try {
+        // The Python endpoint validates every Spotlight and CDN redirect before streaming.
+        const upstream = await fetch(`${base}/api/extract`, {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({url, input: url}),
+          signal: controller.signal
+        });
+        if (!upstream.ok) {
+          const error = await upstream.json().catch(() => ({}));
+          throw new Error(error.error || "تعذر تحميل سناب شات");
+        }
+        if (!upstream.body || !(upstream.headers.get("content-type") || "").startsWith("video/")) {
+          throw new Error("لم يرجع سناب شات ملف فيديو صالحًا");
+        }
+        const headers = {
+          "Content-Type": "video/mp4",
+          "Content-Disposition": 'attachment; filename="VidKeep-Snapchat.mp4"',
+          "Cache-Control": "no-store"
+        };
+        const length = upstream.headers.get("content-length");
+        if (length && /^\\d+$/.test(length)) headers["Content-Length"] = length;
+        res.writeHead(200, headers);
+        await pipeline(Readable.fromWeb(upstream.body), res);
+        return;
+      } finally { clearTimeout(timer); }
+    }
     let extracted;
     try {
       const response = await fetch(`${base}/api/extract`, { method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({url}), signal: controller.signal });
