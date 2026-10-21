@@ -60,8 +60,8 @@ def _read_public_json(page_url):
         "User-Agent": USER_AGENT, "Accept": "text/html,application/xhtml+xml",
     })
     with build_opener(OnlySnapchatRedirects()).open(request, timeout=12) as response:
-        markup = response.read(3_000_001)
-        if len(markup) > 3_000_000:
+        markup = response.read(8_000_001)
+        if len(markup) > 8_000_000:
             raise ValueError("Snapchat page is larger than supported")
         markup = markup.decode("utf-8", "replace")
     # Snapchat's public profile currently exposes Next.js page props, but
@@ -181,9 +181,10 @@ def collect_public_items(page_props, username):
             for i, snap in enumerate(profile_story.get("snapList") or []):
                 append("story", snap, i)
 
-    # A profile can expose a partial set rather than a full historical archive.
-    return {"username": username, "items": items[:200], "count": min(200, len(items)),
-            "truncated": len(items) > 200, "scope": "public-page-visible"}
+    # No arbitrary item quota: return every public video present in this page.
+    # Some profiles expose only a subset, such as the latest 16 Spotlights.
+    return {"username": username, "items": items, "count": len(items),
+            "truncated": False, "scope": "public-page-visible"}
 
 
 def list_public_profile(url):
