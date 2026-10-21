@@ -517,7 +517,20 @@ class handler(BaseHTTPRequestHandler):
                 return
 
             if is_snapchat:
-                url = canonical_snapchat_url(url)
+                try:
+                    url = canonical_snapchat_url(url)
+                except ProviderError as original_error:
+                    # A /t/ share can point to a public story rather than Spotlight.
+                    # Use only the explicitly shared story when it has one video.
+                    from snapchat_public import single_public_story_from_share
+                    media = single_public_story_from_share(original_url)
+                    if not media:
+                        raise original_error
+                    if payload.get("input") == original_url:
+                        self.send_snapchat_video(media, {})
+                    else:
+                        self.respond(200, {"url": media})
+                    return
 
             if is_youtube:
                 # Test explicitly before enabling the native engine site-wide.
