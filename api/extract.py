@@ -525,7 +525,11 @@ class handler(BaseHTTPRequestHandler):
                     from snapchat_public import single_public_story_from_share
                     media = single_public_story_from_share(original_url)
                     if not media:
-                        raise original_error
+                        raise ProviderError(
+                            422,
+                            "تعذر استخراج فيديو الستوري من الرابط العام. "
+                            "قد يكون انتهى أو غير متاح، أو يحتوي عدة مقاطع."
+                        ) from None
                     if payload.get("input") == original_url:
                         self.send_snapchat_video(media, {})
                     else:

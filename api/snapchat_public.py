@@ -107,7 +107,7 @@ def _media_url(snap):
 def _video(snap, kind):
     if not isinstance(snap, dict):
         return False
-    media_type = str(_unwrap(snap.get("mediaType")) or "").lower()
+    media_type = str(_unwrap(snap.get("snapMediaType")) or _unwrap(snap.get("mediaType")) or "").lower()
     if "image" in media_type or "photo" in media_type or media_type in ("0", "image"):
         return False
     # Spotlight entries describe videos, while stories may have photo snaps.
