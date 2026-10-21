@@ -33,7 +33,12 @@ def profile_username(url):
                 or not host_allowed((u.hostname or "").lower(), SNAP)):
             return None
         match = PROFILE_PATTERN.fullmatch(u.path)
-        return match.group(1) if match else None
+        if match:
+            return match.group(1)
+        if (u.hostname or "").lower() == "story.snapchat.com":
+            match = re.fullmatch(r"/([A-Za-z][A-Za-z0-9_.-]{1,30})/?", u.path)
+            return match.group(1) if match else None
+        return None
     except (ValueError, TypeError):
         return None
 
@@ -90,6 +95,7 @@ def _media_url(snap):
         snap.get("mediaUrl"),
         snap.get("snapUrls", {}).get("mediaUrl") if isinstance(snap.get("snapUrls"), dict) else None,
         snap.get("videoMetadata", {}).get("contentUrl") if isinstance(snap.get("videoMetadata"), dict) else None,
+        snap.get("contentUrl"),
     ]
     for candidate in choices:
         candidate = _unwrap(candidate)
@@ -106,7 +112,7 @@ def _video(snap, kind):
         return False
     # Spotlight entries describe videos, while stories may have photo snaps.
     if kind == "spotlight":
-        return True
+        return bool(_spotlight_id(snap) or _media_url(snap))
     metadata = snap.get("videoMetadata")
     if isinstance(metadata, dict) and metadata.get("contentUrl"):
         return True
@@ -143,7 +149,7 @@ def collect_public_items(page_props, username):
             mode = "media"
         else:
             return
-        identity = (kind, sid or source)
+        identity = sid or source
         if identity in seen:
             return
         seen.add(identity)
@@ -167,6 +173,13 @@ def collect_public_items(page_props, username):
         append("spotlight", entry, len(items))
     for entry in page_props.get("spotlightStoryMetadata") or []:
         append("spotlight", entry, len(items))
+    # Some profile versions provide a nested publicProfileInfo.story snapList.
+    profile = page_props.get("publicProfileInfo")
+    if isinstance(profile, dict):
+        profile_story = profile.get("story")
+        if isinstance(profile_story, dict):
+            for i, snap in enumerate(profile_story.get("snapList") or []):
+                append("story", snap, i)
 
     # A profile can expose a partial set rather than a full historical archive.
     return {"username": username, "items": items[:200], "count": min(200, len(items)),
