@@ -6,7 +6,7 @@ export async function handleMultiPlatform(res, input) {
   try {
     const url = /^https?:\/\//i.test(input) ? input : `https://${input}`;
     const hostname = new URL(url).hostname.toLowerCase().replace(/^www\./, "");
-    const hosts = ["youtube.com", "youtu.be", "youtube-nocookie.com", "instagram.com", "facebook.com", "fb.watch", "x.com", "twitter.com", "t.co", "pinterest.com", "pin.it", "reddit.com", "redd.it"];
+    const hosts = ["youtube.com", "youtu.be", "youtube-nocookie.com", "instagram.com", "facebook.com", "fb.watch", "x.com", "twitter.com", "t.co", "pinterest.com", "pin.it", "reddit.com", "redd.it", "snapchat.com"];
     if (!hosts.some(h => hostname === h || hostname.endsWith(`.${h}`))) throw new Error("المنصة غير مدعومة");
     const base = process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : `http://localhost:${process.env.PORT || 3000}`;
     const controller = new AbortController();

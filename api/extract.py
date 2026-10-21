@@ -7,11 +7,12 @@ import warnings
 import sys
 import signal
 import shutil
+import re
 from http.cookiejar import MozillaCookieJar
 from http.server import BaseHTTPRequestHandler
-from urllib.parse import urlsplit, parse_qs
+from urllib.parse import urlsplit, parse_qs, urljoin
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from urllib.request import Request, urlopen, HTTPRedirectHandler, build_opener
 
 import yt_dlp
 
@@ -21,12 +22,16 @@ ALLOWED = (
     "instagram.com", "facebook.com", "fb.watch",
     "x.com", "twitter.com", "t.co",
     "pinterest.com", "pin.it",
-    "reddit.com", "redd.it"
+    "reddit.com", "redd.it",
+    "snapchat.com"
 )
 
 YOUTUBE = (
     "youtube.com", "youtu.be", "youtube-nocookie.com"
 )
+
+SNAPCHAT = ("snapchat.com",)
+SNAPCHAT_CDN = ("sc-cdn.net", "snapcdn.net", "snapchat.com", "snap.com")
 
 ORIGINS = {
     "https://www.vidkeep.net",
@@ -45,6 +50,60 @@ class ProviderError(Exception):
     def __init__(self, status, message):
         self.status = status
         super().__init__(message)
+
+
+
+def safe_snapchat_media(url):
+    """Never proxy an untrusted URL as a video download."""
+    parsed = urlsplit(url)
+    host = (parsed.hostname or "").lower()
+    return (
+        parsed.scheme == "https" and not parsed.username and not parsed.password
+        and parsed.port in (None, 443) and matches_domain(host, SNAPCHAT_CDN)
+    )
+
+
+class SnapchatPageRedirect(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        target = urljoin(req.full_url, newurl)
+        parsed = urlsplit(target)
+        if (parsed.scheme != "https" or parsed.username or parsed.password
+                or parsed.port not in (None, 443)
+                or not matches_domain((parsed.hostname or "").lower(), SNAPCHAT)):
+            raise ProviderError(422, "رابط سناب شات تحول إلى موقع غير موثوق.")
+        return super().redirect_request(req, fp, code, msg, headers, target)
+
+
+class SnapchatMediaRedirect(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        target = urljoin(req.full_url, newurl)
+        if not safe_snapchat_media(target):
+            raise ProviderError(502, "مصدر فيديو سناب شات غير موثوق.")
+        return super().redirect_request(req, fp, code, msg, headers, target)
+
+
+def canonical_snapchat_url(url):
+    """Resolve public /t/ shares to one explicit Spotlight video, never a profile/feed."""
+    parsed = urlsplit(url)
+    if (parsed.scheme != "https" or not matches_domain((parsed.hostname or "").lower(), SNAPCHAT)
+            or parsed.username or parsed.password or parsed.port not in (None, 443)):
+        raise ValueError()
+    if re.fullmatch(r"/t/[A-Za-z0-9]{8}/?", parsed.path):
+        request = Request(url, headers={"User-Agent": "Mozilla/5.0 (compatible; VidKeep/1.0)"})
+        try:
+            with build_opener(SnapchatPageRedirect()).open(request, timeout=12) as response:
+                url = response.geturl()
+        except (HTTPError, URLError, TimeoutError):
+            raise ProviderError(502, "تعذر فتح رابط مشاركة سناب شات. تأكد أنه عام ومتاح.") from None
+        parsed = urlsplit(url)
+
+    if not matches_domain((parsed.hostname or "").lower(), SNAPCHAT):
+        raise ProviderError(422, "رابط سناب شات غير صالح.")
+    match = re.fullmatch(r"/(?:@[^/]+/)?spotlight/([A-Za-z0-9_-]{20,128})/?", parsed.path)
+    if not match:
+        raise ProviderError(422, "هذا الرابط ليس لمقطع أضواء عام في سناب شات.")
+    # Explicit /spotlight/ URL triggers yt-dlp's dedicated Spotlight extractor.
+    return "https://www.snapchat.com/spotlight/" + match.group(1)
 
 
 def canonical_youtube_url(url):
@@ -309,6 +368,38 @@ class handler(BaseHTTPRequestHandler):
             except OSError:
                 self.close_connection = True
 
+    def send_snapchat_video(self, direct, http_headers):
+        """Send the original MP4 as an attachment rather than opening a player."""
+        if not safe_snapchat_media(direct):
+            raise ProviderError(502, "لم يرجع سناب شات رابط فيديو من مصدر موثوق.")
+        headers = {
+            "User-Agent": http_headers.get("User-Agent") or "Mozilla/5.0",
+            "Referer": "https://www.snapchat.com/",
+        }
+        request = Request(direct, headers=headers)
+        try:
+            upstream = build_opener(SnapchatMediaRedirect()).open(request, timeout=25)
+        except (HTTPError, URLError, TimeoutError):
+            raise ProviderError(502, "تعذر جلب ملف سناب شات من المصدر.") from None
+        with upstream:
+            content_type = upstream.headers.get("Content-Type", "video/mp4")
+            if not (content_type.startswith("video/") or content_type.startswith("application/octet-stream")):
+                raise ProviderError(502, "المصدر لم يرجع فيديو قابلاً للتنزيل.")
+            self.send_response(200)
+            self.cors_headers()
+            self.send_header("Content-Type", "video/mp4")
+            self.send_header("Content-Disposition", 'attachment; filename="VidKeep-Snapchat.mp4"')
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Access-Control-Expose-Headers", "Content-Length, Content-Disposition")
+            length = upstream.headers.get("Content-Length", "")
+            if length.isdigit():
+                self.send_header("Content-Length", length)
+            self.end_headers()
+            try:
+                shutil.copyfileobj(upstream, self.wfile, length=65536)
+            except (OSError, TimeoutError):
+                self.close_connection = True
+
     def send_youtube_video(self, direct):
         """Stream provider media through our CORS-enabled endpoint."""
         req = Request(direct, headers={"User-Agent": "VidKeep/1.0"})
@@ -403,6 +494,10 @@ class handler(BaseHTTPRequestHandler):
                 raise ValueError()
 
             is_youtube = matches_domain(host, YOUTUBE)
+            is_snapchat = matches_domain(host, SNAPCHAT)
+            original_url = url
+            if is_snapchat:
+                url = canonical_snapchat_url(url)
 
             if is_youtube:
                 # Test explicitly before enabling the native engine site-wide.
@@ -537,6 +632,8 @@ class handler(BaseHTTPRequestHandler):
                 return
 
             direct = info.get("url") or ""
+            if is_snapchat and not direct:
+                direct = next(select_video(info), {}).get("url") or ""
 
             if not direct.startswith("https://"):
                 self.respond(400, {
@@ -545,6 +642,20 @@ class handler(BaseHTTPRequestHandler):
                         "الفيديو والصوت."
                     )
                 })
+                return
+
+            if is_snapchat:
+                if not safe_snapchat_media(direct):
+                    raise ProviderError(502, "لم يرجع سناب شات رابط MP4 موثوقًا.")
+                http_headers = info.get("http_headers") or {}
+                safe_headers = {
+                    "User-Agent": str(http_headers.get("User-Agent") or "Mozilla/5.0"),
+                    "Referer": "https://www.snapchat.com/",
+                }
+                if payload.get("input") == original_url or payload.get("download") is True:
+                    self.send_snapchat_video(direct, safe_headers)
+                else:
+                    self.respond(200, {"url": direct, "headers": safe_headers})
                 return
 
             self.respond(200, {"url": direct})
