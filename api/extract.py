@@ -496,6 +496,26 @@ class handler(BaseHTTPRequestHandler):
             is_youtube = matches_domain(host, YOUTUBE)
             is_snapchat = matches_domain(host, SNAPCHAT)
             original_url = url
+
+            if is_snapchat and payload.get("action") == "snapchat_profile":
+                from snapchat_public import list_public_profile, profile_username
+                if profile_username(url) is None:
+                    raise ProviderError(422, "استخدم رابط حساب سناب عام، مثل snapchat.com/add/username.")
+                try:
+                    listing = list_public_profile(url)
+                except ValueError:
+                    raise ProviderError(502, "تعذر قراءة مقاطع الحساب العامة حاليًا. حاول لاحقًا.") from None
+                self.respond(200, {"type": "snapchat_collection", **listing})
+                return
+
+            if is_snapchat and payload.get("action") == "snapchat_asset":
+                from snapchat_public import safe_media_url
+                media = str(payload.get("media", ""))
+                if not safe_media_url(media):
+                    raise ProviderError(422, "عنوان ملف سناب غير صالح.")
+                self.send_snapchat_video(media, {})
+                return
+
             if is_snapchat:
                 url = canonical_snapchat_url(url)
 
