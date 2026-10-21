@@ -113,16 +113,29 @@ class OnlySnapchatRedirects(HTTPRedirectHandler):
 
 
 def _read_public_json(page_url):
+    """Read public Snapchat page metadata plus the resolved share URL."""
     request = Request(page_url, headers={
         "User-Agent": USER_AGENT, "Accept": "text/html,application/xhtml+xml",
     })
-    with build_opener(OnlySnapchatRedirects()).open(request, timeout=12) as response:
-        markup = response.read(8_000_001)
-        if len(markup) > 8_000_000:
+    with build_opener(OnlySnapchatRedirects()).open(request, timeout=15) as response:
+        final_url = response.geturl()
+        raw = response.read(8_000_001)
+        if len(raw) > 8_000_000:
             raise ValueError("Snapchat page is larger than supported")
-        markup = markup.decode("utf-8", "replace")
-    # Snapchat's public profile currently exposes Next.js page props, but
-    # don't assume the __NEXT_DATA__ id will always be present.
+        markup = raw.decode("utf-8", "replace")
+
+    # The primary page may offer the shared video as og:video. Never parse
+    # recommended videos or social thumbnails as a substitute for the story.
+    primary_meta = {}
+    for tag in re.findall(r"<meta\b[^>]{0,4096}>", markup, flags=re.I):
+        attrs = dict((k.lower(), html.unescape(v)) for k, _, v in re.findall(
+            r'([A-Za-z_:][-A-Za-z0-9_:]*)\s*=\s*(["\x27])(.*?)\2', tag, flags=re.S))
+        key = (attrs.get("property") or attrs.get("name") or "").lower()
+        if key in ("og:video", "og:video:url", "og:video:secure_url", "og:url", "twitter:player:stream"):
+            value = attrs.get("content", "")
+            if value:
+                primary_meta[key] = value
+
     pattern = re.compile(r"<script\b([^>]*)>(.*?)</script\s*>", re.I | re.S)
     for match in pattern.finditer(markup):
         attributes, body = match.group(1), match.group(2)
@@ -130,13 +143,22 @@ def _read_public_json(page_url):
                 or "__NEXT_DATA__" in attributes):
             continue
         try:
-            data = json.loads(html.unescape(body))
+            data = json.loads(body)
         except (ValueError, TypeError):
-            continue
+            try:
+                data = json.loads(html.unescape(body))
+            except (ValueError, TypeError):
+                continue
         props = data.get("props", {}).get("pageProps") if isinstance(data, dict) else None
         if isinstance(props, dict):
+            props = dict(props)
+            props["__vidkeep_primary_meta"] = primary_meta
+            props["__vidkeep_final_url"] = final_url
             return props
-    return {}
+
+    return {"__vidkeep_primary_meta": primary_meta,
+            "__vidkeep_final_url": final_url}
+
 
 
 def _unwrap(value):
@@ -245,44 +267,75 @@ def collect_public_items(page_props, username):
 
 
 
-def single_public_story_from_share(url):
-    """Extract only an unambiguous public video from a share/highlight page.
+def public_story_items_from_share(url):
+    """Return primary shared Story/Highlight videos, never recommended media.
 
-    Never pick an unrelated video from recommendations or a whole profile.
-    Return None for unavailable or multi-video stories.
+    For /t/ links this may contain more than one story snap. A caller can
+    display each one rather than rejecting the entire public collection.
     """
-    try:
-        u = urlsplit(url)
-        path = u.path
-        if (u.scheme != "https" or u.username or u.password
-                or u.port not in (None, 443)
-                or not host_allowed((u.hostname or "").lower(), SNAP)):
-            return None
-        if not (re.fullmatch(r"/t/[A-Za-z0-9]{8}/?", path)
-                or re.fullmatch(r"/@[A-Za-z0-9_.-]+/highlight/[A-Fa-f0-9-]{16,64}/?", path)
-                or re.fullmatch(r"/o/[A-Za-z0-9_-]{20,128}/?", path)):
-            return None
+    u = urlsplit(url)
+    path = u.path
+    if (u.scheme != "https" or u.username or u.password or u.port not in (None, 443)
+            or not host_allowed((u.hostname or "").lower(), SNAP)):
+        return []
+    if not (re.fullmatch(r"/t/[A-Za-z0-9]{8}/?", path)
+            or re.fullmatch(r"/@[A-Za-z0-9_.-]+/highlight/[A-Za-z0-9-]{16,128}/?", path)
+            or re.fullmatch(r"/o/[A-Za-z0-9_-]{20,128}/?", path)
+            or re.fullmatch(r"/@[A-Za-z0-9_.-]+/story/[A-Za-z0-9_-]{12,128}/?", path)):
+        return []
 
+    try:
         props = _read_public_json(url)
-        # These keys identify the primary shared story, not suggested items.
-        for key in ("selectedStory", "preselectedStory", "playerStory",
-                    "premiumStory", "highlightStory", "story"):
-            source = props.get(key)
-            if not isinstance(source, dict):
-                continue
-            snaps = source.get("snapList") or []
-            if not isinstance(snaps, list):
-                continue
-            videos = [_media_url(snap) for snap in snaps
-                      if isinstance(snap, dict) and _video(snap, "story")]
-            videos = [media for media in videos if media]
-            if len(videos) == 1:
-                return videos[0]
-            if len(videos) > 1:
-                return None
     except (HTTPError, URLError, TimeoutError, ValueError):
-        return None
-    return None
+        return []
+
+    unique, items = set(), []
+    def add_media(snap):
+        if not isinstance(snap, dict) or not _video(snap, "story"):
+            return
+        media = _media_url(snap)
+        if media and media not in unique:
+            unique.add(media)
+            items.append({"kind": "story", "title": "story " + str(len(items) + 1),
+                          "url": media, "mode": "media"})
+
+    def primary_snaps(source, depth=0):
+        """Walk only explicitly named primary/story containers (not suggestions)."""
+        if depth > 5 or not isinstance(source, (dict, list)):
+            return
+        if isinstance(source, list):
+            for entry in source:
+                primary_snaps(entry, depth + 1)
+            return
+        if _media_url(source):
+            add_media(source)
+        for key in ("snapList", "snaps", "story", "storyData", "selectedStory",
+                    "preselectedStory", "playerStory", "premiumStory",
+                    "highlightStory", "snap", "snapUrls"):
+            value = source.get(key)
+            if isinstance(value, (dict, list)):
+                primary_snaps(value, depth + 1)
+
+    for key in ("selectedStory", "preselectedStory", "playerStory", "premiumStory",
+                "highlightStory", "story", "storyData"):
+        primary_snaps(props.get(key))
+
+    # Use main-page canonical video metadata only when no story list exists.
+    # Never use thumbnail fields or random video URLs embedded in page scripts.
+    if not items:
+        meta = props.get("__vidkeep_primary_meta") or {}
+        for field in ("og:video:secure_url", "og:video:url", "og:video", "twitter:player:stream"):
+            media = meta.get(field)
+            if media and safe_media_url(media):
+                items.append({"kind": "story", "title": "story 1",
+                              "url": media, "mode": "media"})
+                break
+    return items
+
+
+def single_public_story_from_share(url):
+    items = public_story_items_from_share(url)
+    return items[0]["url"] if len(items) == 1 else None
 
 
 
@@ -752,6 +805,19 @@ class handler(BaseHTTPRequestHandler):
             is_snapchat = matches_domain(host, SNAPCHAT)
             original_url = url
 
+            if is_snapchat and payload.get("action") == "snapchat_share":
+                # Explicit discovery action for multi-snap public Story shares.
+                # The normal download route still returns a single video.
+                items = public_story_items_from_share(url)
+                self.respond(200, {
+                    "type": "snapchat_collection",
+                    "items": items,
+                    "count": len(items),
+                    "scope": "public-shared-story",
+                    "username": "share",
+                })
+                return
+
             if is_snapchat and payload.get("action") == "snapchat_profile":
                 if profile_username(url) is None:
                     raise ProviderError(422, "استخدم رابط حساب سناب عام، مثل snapchat.com/add/username.")
@@ -780,7 +846,7 @@ class handler(BaseHTTPRequestHandler):
                         raise ProviderError(
                             422,
                             "تعذر استخراج فيديو الستوري من الرابط العام. "
-                            "قد يكون انتهى أو غير متاح، أو يحتوي عدة مقاطع."
+                            "قد تكون الستوري منتهية أو متعددة المقاطع. افتح رابطها كقائمة فيديوهات."
                         ) from None
                     if payload.get("input") == original_url:
                         self.send_snapchat_video(media, {})
