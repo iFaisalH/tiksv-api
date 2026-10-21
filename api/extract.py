@@ -361,6 +361,16 @@ def list_public_profile(url):
             "truncated": False, "scope": "public-page-visible"}
 
 
+def snapchat_story_items_for_url(url):
+    """Resolve only public Story and Highlight videos associated with this URL."""
+    if profile_username(url):
+        listing = list_public_profile(url)
+        return [item for item in listing["items"]
+                if item.get("kind") in ("story", "highlight") and item.get("mode") == "media"]
+    return [item for item in public_story_items_from_share(url)
+            if item.get("mode") == "media"]
+
+
 def safe_snapchat_media(url):
     """Never proxy an untrusted URL as a video download."""
     parsed = urlsplit(url)
@@ -676,6 +686,136 @@ class handler(BaseHTTPRequestHandler):
             except OSError:
                 self.close_connection = True
 
+    def send_snapchat_story_merged(self, original_url):
+        """Losslessly concatenate public, compatible Story video streams into MP4.
+
+        We do not reconstruct or remove burned-in watermarks. If the source
+        videos have incompatible dimensions/codecs, fail rather than silently
+        transcoding and reducing the requested source quality.
+        """
+        import imageio_ffmpeg
+
+        try:
+            items = snapchat_story_items_for_url(original_url)
+        except ValueError:
+            raise ProviderError(502, "تعذر فتح الستوري العام من سناب شات.") from None
+        if not items:
+            raise ProviderError(422, "لا توجد مقاطع ستوري عامة متاحة للدمج في هذا الرابط.")
+        if len(items) == 1:
+            self.send_snapchat_video(items[0]["url"], {})
+            return
+        # Avoid reporting a partial story as the whole story.
+        if len(items) > 40:
+            raise ProviderError(413, "عدد مقاطع الستوري يتجاوز سعة الدمج الحالية (40 مقطعًا).")
+
+        total_limit = 180 * 1024 * 1024
+        max_single = 85 * 1024 * 1024
+        started = time.monotonic()
+        ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+        with tempfile.TemporaryDirectory(prefix="vidkeep-snap-") as directory:
+            paths, total = [], 0
+            fingerprints = []
+            for index, item in enumerate(items):
+                media_url = item.get("url", "")
+                if not safe_snapchat_media(media_url):
+                    raise ProviderError(422, "أحد روابط ملفات الستوري غير موثوق.")
+                if time.monotonic() - started > 85:
+                    raise ProviderError(504, "استغرق جلب الستوري أكثر من المهلة المتاحة.")
+                request = Request(media_url, headers={
+                    "User-Agent": USER_AGENT,
+                    "Referer": "https://www.snapchat.com/",
+                    "Accept": "video/mp4,video/*;q=0.9,*/*;q=0.5",
+                })
+                try:
+                    upstream = build_opener(SnapchatMediaRedirect()).open(request, timeout=12)
+                    with upstream:
+                        content_type = upstream.headers.get("Content-Type", "").lower()
+                        if not (content_type.startswith("video/")
+                                or content_type.startswith("application/octet-stream")):
+                            raise ProviderError(422, "أحد مقاطع الستوري ليس فيديو MP4.")
+                        path = os.path.join(directory, "snap-%03d.mp4" % index)
+                        length = 0
+                        with open(path, "wb") as file:
+                            while True:
+                                chunk = upstream.read(64 * 1024)
+                                if not chunk:
+                                    break
+                                length += len(chunk)
+                                total += len(chunk)
+                                if length > max_single or total > total_limit:
+                                    raise ProviderError(413, "الستوري يتجاوز سعة الدمج على الخادم (180 ميجابايت).")
+                                file.write(chunk)
+                        if length == 0:
+                            raise ProviderError(502, "تعذر استلام أحد مقاطع الستوري.")
+                except (HTTPError, URLError, TimeoutError, OSError):
+                    raise ProviderError(502, "فشل جلب أحد مقاطع الستوري من المصدر.") from None
+
+                try:
+                    probe = subprocess.run(
+                        [ffmpeg, "-hide_banner", "-i", path],
+                        capture_output=True, text=True, timeout=10,
+                    ).stderr
+                except (OSError, subprocess.TimeoutExpired):
+                    raise ProviderError(502, "تعذر فحص توافق صيغ فيديوهات الستوري.") from None
+                video = re.search(
+                    r"Video:\s*([^,\s]+)[^\r\n]*?(\d{2,5}x\d{2,5})",
+                    probe, re.I
+                )
+                audio = re.search(r"Audio:\s*([^,\s]+)", probe, re.I)
+                if not video:
+                    raise ProviderError(422, "إحدى لقطات الستوري ليست فيديو مدعومًا.")
+                fingerprints.append(
+                    (video.group(1).lower(), video.group(2),
+                     audio.group(1).lower() if audio else None)
+                )
+                paths.append(path)
+
+            if len(set(fingerprints)) > 1:
+                raise ProviderError(
+                    422,
+                    "تختلف صيغ أو أبعاد بعض مقاطع الستوري، "
+                    "ولا يمكن دمجها دون إعادة ترميز قد تقلل الجودة."
+                )
+
+            concat_path = os.path.join(directory, "inputs.txt")
+            with open(concat_path, "w", encoding="utf-8") as file:
+                for path in paths:
+                    # Every path is constructed in our own temporary directory.
+                    file.write("file '" + path + "'\n")
+            output_path = os.path.join(directory, "story.mp4")
+            try:
+                result = subprocess.run(
+                    [ffmpeg, "-hide_banner", "-loglevel", "error",
+                     "-f", "concat", "-safe", "0", "-i", concat_path,
+                     "-map", "0:v:0", "-map", "0:a?", "-c", "copy",
+                     "-movflags", "+faststart", "-y", output_path],
+                    capture_output=True, timeout=50,
+                )
+            except (OSError, subprocess.TimeoutExpired):
+                raise ProviderError(504, "تجاوز دمج فيديوهات الستوري المهلة المتاحة.") from None
+            if result.returncode != 0 or not os.path.isfile(output_path):
+                raise ProviderError(502, "تعذر دمج ملفات الستوري دون إعادة ترميز.")
+
+            size = os.path.getsize(output_path)
+            if size < 1024 or size > 220 * 1024 * 1024:
+                raise ProviderError(413, "حجم ملف الستوري المدمج خارج السعة المتاحة.")
+            with open(output_path, "rb") as merged:
+                self.send_response(200)
+                self.cors_headers()
+                self.send_header("Content-Type", "video/mp4")
+                self.send_header("Content-Disposition",
+                                 'attachment; filename="VidKeep-Snapchat-Story-%d.mp4"' % len(items))
+                self.send_header("Content-Length", str(size))
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Access-Control-Expose-Headers",
+                                 "Content-Length, Content-Disposition")
+                self.end_headers()
+                try:
+                    shutil.copyfileobj(merged, self.wfile, length=65536)
+                except (OSError, TimeoutError):
+                    self.close_connection = True
+
+
     def send_snapchat_video(self, direct, http_headers):
         """Send the original MP4 as an attachment rather than opening a player."""
         if not safe_snapchat_media(direct):
@@ -804,6 +944,23 @@ class handler(BaseHTTPRequestHandler):
             is_youtube = matches_domain(host, YOUTUBE)
             is_snapchat = matches_domain(host, SNAPCHAT)
             original_url = url
+
+            if is_snapchat and payload.get("action") == "snapchat_story_info":
+                try:
+                    items = snapchat_story_items_for_url(url)
+                except ValueError:
+                    raise ProviderError(502, "تعذر قراءة الستوري العام من سناب شات.") from None
+                self.respond(200, {
+                    "type": "snapchat_story",
+                    "count": len(items),
+                    "items": items,
+                    "can_merge": len(items) > 1,
+                })
+                return
+
+            if is_snapchat and payload.get("action") == "snapchat_merge":
+                self.send_snapchat_story_merged(url)
+                return
 
             if is_snapchat and payload.get("action") == "snapchat_share":
                 # Explicit discovery action for multi-snap public Story shares.
